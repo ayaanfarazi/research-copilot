@@ -1,0 +1,97 @@
+{
+  "year": 2023,
+  "rankings": {
+    "revenue": {
+      "RevenueFromContractWithCustomerExcludingAssessedTax": 3133,
+      "Revenues": 2668,
+      "SalesRevenueNet": null,
+      "SalesRevenueGoodsNet": null
+    },
+    "cogs": {
+      "CostOfGoodsAndServicesSold": 1894,
+      "CostOfRevenue": 1667,
+      "CostOfGoodsSold": null,
+      "CostOfSales": null
+    },
+    "operating_income": {
+      "OperatingIncomeLoss": 5337
+    },
+    "net_income": {
+      "NetIncomeLoss": 6363
+    },
+    "interest_expense": {
+      "InterestExpense": 3609,
+      "InterestExpenseNonoperating": 115,
+      "InterestAndDebtExpense": 256,
+      "InterestExpenseDebt": 877
+    },
+    "dep_amort": {
+      "DepreciationDepletionAndAmortization": 3268,
+      "DepreciationAmortizationAndAccretionNet": 387,
+      "DepreciationAndAmortization": 2061
+    },
+    "depreciation": {
+      "Depreciation": 3937,
+      "DepreciationNonproduction": 209
+    },
+    "amortization_intangibles": {
+      "AmortizationOfIntangibleAssets": 3253
+    },
+    "tax_expense": {
+      "IncomeTaxExpenseBenefit": 5389
+    },
+    "operating_cash_flow": {
+      "NetCashProvidedByUsedInOperatingActivities": 6505,
+      "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations": 457
+    },
+    "capex": {
+      "PaymentsToAcquirePropertyPlantAndEquipment": 4191,
+      "PaymentsToAcquireProductiveAssets": 682,
+      "PaymentsToAcquireOtherProductiveAssets": 170
+    },
+    "debt_total": {
+      "LongTermDebt": 2290,
+      "DebtLongtermAndShorttermCombinedAmount": 316
+    },
+    "debt_current": {
+      "DebtCurrent": 406,
+      "LongTermDebtCurrent": 1547,
+      "LongTermDebtAndCapitalLeaseObligationsCurrent": 398,
+      "ShortTermBorrowings": 786
+    },
+    "debt_noncurrent": {
+      "LongTermDebtNoncurrent": 1873
+    },
+    "cash": {
+      "CashAndCashEquivalentsAtCarryingValue": 5350,
+      "CashAndCashEquivalents": null,
+      "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": 5463
+    },
+    "short_term_investments": {
+      "ShortTermInvestments": 783,
+      "MarketableSecuritiesCurrent": 430
+    },
+    "assets": {
+      "Assets": 6428
+    },
+    "liabilities": {
+      "Liabilities": 5745
+    },
+    "equity": {
+      "StockholdersEquity": 6260,
+      "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": 2405
+    },
+    "op_lease_liab_current": {
+      "OperatingLeaseLiabilityCurrent": 3920
+    },
+    "op_lease_liab_noncurrent": {
+      "OperatingLeaseLiabilityNoncurrent": 3859
+    },
+    "diluted_shares": {
+      "WeightedAverageNumberOfDilutedSharesOutstanding": 5821
+    },
+    "eps_diluted": {
+      "EarningsPerShareDiluted": 5704
+    }
+  }
+}

@@ -95,3 +95,22 @@ def get_company_facts(cik: str) -> dict:
     """
     url = f"{config.SEC_BASE_URL}/api/xbrl/companyfacts/CIK{cik}.json"
     return get_json(url)
+
+
+def get_submissions(cik: str) -> dict:
+    """
+    Fetch a company's submissions metadata from the SEC submissions API.
+
+    Used for issuer-level facts that aren't in companyfacts: the SIC industry code
+    (to detect banks/insurers whose credit panel we degrade rather than fake) and
+    the reported fiscal-year-end.
+
+    Args:
+        cik: 10-digit zero-padded CIK string, e.g. "0000789019".
+
+    Returns:
+        Submissions dict. Useful keys: "sic", "sicDescription", "fiscalYearEnd".
+    """
+    url = f"{config.SEC_BASE_URL}/submissions/CIK{cik}.json"
+    return get_json(url)
+    
