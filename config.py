@@ -30,5 +30,8 @@ SEC_USER_AGENT: str = _require("SEC_USER_AGENT")
 SEC_BASE_URL = "https://data.sec.gov"
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
+# Model ID kept here so we can swap models without touching every call site.
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
 CACHE_DIR = Path("data/cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

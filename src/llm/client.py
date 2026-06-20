@@ -3,10 +3,6 @@ from pydantic import BaseModel
 
 import config
 
-# Sonnet is the right balance of capability and cost for dev/smoke testing.
-# Swap to a more capable model for reasoning panels in Phase 2.5 if needed.
-_MODEL = "claude-sonnet-4-5"
-
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
 
@@ -32,7 +28,7 @@ def smoke_call() -> SmokeTestResponse:
         ValidationError:               Model returned JSON that doesn't match schema.
     """
     response = _client.messages.create(
-        model=_MODEL,
+        model=config.ANTHROPIC_MODEL,
         max_tokens=64,
         messages=[
             {
