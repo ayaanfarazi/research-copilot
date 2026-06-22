@@ -42,6 +42,19 @@ _ITEM_7_RE  = re.compile(r"^(?:###\s+)?\s*item\s+7[\.\s]",  re.IGNORECASE)
 _ITEM_7A_RE = re.compile(r"^(?:###\s+)?\s*item\s+7a[\.\s]", re.IGNORECASE)
 _ITEM_8_RE  = re.compile(r"^(?:###\s+)?\s*item\s+8[\.\s]",  re.IGNORECASE)
 
+# Constrained fallback for filers that publish a glossy annual-report body with
+# descriptive headings and put the SEC Item cross-reference index at the end.
+_BUSINESS_SUMMARY_RE = re.compile(r"^(?:###\s+)?\s*business\s+summary\s*$", re.IGNORECASE)
+_RISK_FACTORS_RE = re.compile(r"^(?:###\s+)?\s*risk\s+factors\s*$", re.IGNORECASE)
+_MDA_RE = re.compile(
+    r"^(?:###\s+)?\s*management'?s\s+discussion\s+and\s+analysis",
+    re.IGNORECASE,
+)
+_FINANCIAL_STATEMENTS_RE = re.compile(
+    r"^(?:###\s+)?\s*financial\s+statements\s+and\s+supplementary\s+data\s*$",
+    re.IGNORECASE,
+)
+
 
 def split_10k(text: str, filing_doc: FilingDocument) -> FilingDocument:
     """
@@ -71,6 +84,19 @@ def split_10k(text: str, filing_doc: FilingDocument) -> FilingDocument:
     item_7a_off = _find_section(lines, line_offsets, _ITEM_7A_RE, toc_end_offset)
     item_8_off  = _find_section(lines, line_offsets, _ITEM_8_RE,  toc_end_offset)
 
+    # Some annual-report style 10-Ks (MCD) use descriptive body headings and
+    # relegate "Item N" labels to an end-of-document cross-reference index.
+    # MCD-style filers: toc_end_offset=0 (no Item N TOC detected);
+    # toc_trap assertion passes via 5000-char floor only.
+    if item_1_off is None:
+        item_1_off = _find_descriptive_section(lines, line_offsets, _BUSINESS_SUMMARY_RE, toc_end_offset)
+    if item_1a_off is None:
+        item_1a_off = _find_descriptive_section(lines, line_offsets, _RISK_FACTORS_RE, toc_end_offset)
+    if item_7_off is None:
+        item_7_off = _find_descriptive_section(lines, line_offsets, _MDA_RE, toc_end_offset)
+    if item_8_off is None:
+        item_8_off = _find_descriptive_section(lines, line_offsets, _FINANCIAL_STATEMENTS_RE, toc_end_offset)
+
     # SEAM 1: populate offset fields before returning.
     filing_doc.item_1_start_offset  = item_1_off  or 0
     filing_doc.item_1a_start_offset = item_1a_off or 0
@@ -78,15 +104,15 @@ def split_10k(text: str, filing_doc: FilingDocument) -> FilingDocument:
 
     # Phase C: extract section bodies.
     if item_1_off is not None:
-        end = item_1a_off or item_7_off or len(text)
+        end = _next_boundary_after(item_1_off, item_1a_off, item_7_off, item_8_off, doc_len=len(text))
         filing_doc.sections["item_1"] = text[item_1_off:end].strip()
 
     if item_1a_off is not None:
-        end = item_7_off or item_8_off or len(text)
+        end = _next_boundary_after(item_1a_off, item_7_off, item_8_off, doc_len=len(text))
         filing_doc.sections["item_1a"] = text[item_1a_off:end].strip()
 
     if item_7_off is not None:
-        end = item_7a_off or item_8_off or len(text)
+        end = _next_boundary_after(item_7_off, item_7a_off, item_1a_off, item_8_off, doc_len=len(text))
         filing_doc.sections["item_7"] = text[item_7_off:end].strip()
 
     # Mark degraded if any core section is absent.
@@ -130,9 +156,11 @@ def _detect_toc_end(lines: list[str], line_offsets: list[int], doc_len: int) -> 
         window = eligible[start : start + 120]
         distinct_items: set[str] = set()
         last_line_end = 0
-        for _, char_off, line in window:
+        for line_idx, char_off, line in window:
             m = _ITEM_ANY_NUM_RE.match(line)
             if m:
+                if _has_substantive_followthrough(lines, line_idx):
+                    continue
                 distinct_items.add(m.group(1).lower())
                 last_line_end = char_off + len(line)
         if len(distinct_items) >= 5:
@@ -165,9 +193,56 @@ def _find_section(
             continue
         if len(line) > 120:
             continue
-        # Require substantive text within the next 5 lines.
-        for j in range(i + 1, min(i + 6, len(lines))):
+        if _has_substantive_followthrough(lines, i):
+            return off
+        # No substantive follow-through - skip.
+    return None
+
+
+def _find_descriptive_section(
+    lines: list[str],
+    line_offsets: list[int],
+    pattern: re.Pattern[str],
+    toc_end_offset: int,
+) -> int | None:
+    """
+    Find annual-report style descriptive headings while rejecting TOC rows.
+
+    These filings often list "Business Summary ... 3" in the TOC and then use
+    the same descriptive heading in the body. A following page-number line is
+    the strongest signal that the match is still the TOC.
+    """
+    for i, (off, line) in enumerate(zip(line_offsets, lines)):
+        if off <= toc_end_offset:
+            continue
+        if not pattern.match(line):
+            continue
+        if len(line) > 120:
+            continue
+        if _next_nonempty_is_page_number(lines, i):
+            continue
+        for j in range(i + 1, min(i + 9, len(lines))):
             if len(lines[j].strip()) >= 80:
                 return off
-        # No substantive follow-through — skip.
     return None
+
+
+def _next_boundary_after(start: int, *candidates: int | None, doc_len: int) -> int:
+    later = [candidate for candidate in candidates if candidate is not None and candidate > start]
+    return min(later) if later else doc_len
+
+
+def _has_substantive_followthrough(lines: list[str], line_idx: int) -> bool:
+    """Return True when a heading is followed by real body text within 5 lines."""
+    for j in range(line_idx + 1, min(line_idx + 6, len(lines))):
+        if len(lines[j].strip()) >= 80:
+            return True
+    return False
+
+
+def _next_nonempty_is_page_number(lines: list[str], line_idx: int) -> bool:
+    for j in range(line_idx + 1, min(line_idx + 5, len(lines))):
+        value = lines[j].strip()
+        if value:
+            return bool(re.fullmatch(r"(?:page\s*)?\d{1,3}", value, re.IGNORECASE))
+    return False

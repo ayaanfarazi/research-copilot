@@ -20,13 +20,25 @@ _NOTE_HEADING_RE = re.compile(
 
 # Pattern that identifies a note as the debt/borrowings note based on its heading.
 _DEBT_HEADING_RE = re.compile(
-    r"(?:long.{0,6}term\s+debt"
+    r"(?:^\s*(?:note\s+\d+[\.\s—–-]|\d+\.\s)[\s\S]{0,160}\bdebt\b"
+    r"|long.{0,6}term\s+debt"
     r"|long.{0,6}term\s+borrow"
     r"|notes?\s+payable"
     r"|credit\s+facilit"
     r"|debt\s+and\s+(?:credit|financing|borrow)"
     r"|long.{0,6}term\s+financing)",
     re.IGNORECASE,
+)
+
+_UNNUMBERED_DEBT_HEADING_RE = re.compile(
+    r"^\s*debt\s+financing\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_UNNUMBERED_NOTE_END_RE = re.compile(
+    r"^\s*(?:share-based\s+compensation|financial\s+instruments|fair\s+value"
+    r"|income\s+taxes|segment\s+and\s+geographic\s+information|leases)\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -42,7 +54,7 @@ def find_debt_footnote(text: str) -> str:
     note_starts = [m.start() for m in _NOTE_HEADING_RE.finditer(text)]
 
     if not note_starts:
-        return ""
+        return _find_unnumbered_debt_note(text)
 
     candidates: list[str] = []
     for idx, start in enumerate(note_starts):
@@ -57,4 +69,20 @@ def find_debt_footnote(text: str) -> str:
         return ""
 
     # SEAM 6: explicit tie-break — largest extracted_body wins.
+    return max(candidates, key=len)
+
+
+def _find_unnumbered_debt_note(text: str) -> str:
+    """Fallback for annual-report notes headed by title only, e.g. MCD."""
+    candidates: list[str] = []
+    for match in _UNNUMBERED_DEBT_HEADING_RE.finditer(text):
+        start = match.start()
+        next_heading = _UNNUMBERED_NOTE_END_RE.search(text, match.end())
+        end = next_heading.start() if next_heading else min(len(text), start + 15000)
+        candidates.append(text[start:end])
+
+    if not candidates:
+        return ""
+
+    # Preserve the VZ tie-break principle for fallback candidates too.
     return max(candidates, key=len)
