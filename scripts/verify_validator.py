@@ -177,6 +177,11 @@ def main() -> int:
     # Excerpt tests
     doc = FilingDocument(
         ticker="TEST",
+        cik="0",
+        accession="0000000000-00-000000",
+        filed_date="2025-01-01",
+        period_of_report="2024-12-31",
+        primary_doc="test.htm",
         sections={"item_1a": "Network competition may reduce margins. Debt was $144 billion."},
     )
     fin_144b = _fin(total_debt=144_000_000_000)
