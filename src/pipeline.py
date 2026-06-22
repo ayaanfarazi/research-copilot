@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from src.data import dedup, resolver, tag_map
 from src.data.models import CompanyFinancials, ComputedMetric, ConfidenceTier
-from src.metrics import constructed, covenant, ratios, scorecard, survival
+from src.metrics import constructed, covenant, qoe, ratios, scorecard, survival
 from src.metrics._common import FigureStore, weakest_tier
 from src.sec.client import get_company_facts, get_submissions
 from src.sec.ticker import get_cik
@@ -180,6 +180,7 @@ def build_financials(ticker: str, years: int = 5) -> CompanyFinancials:
         constructed.compute_total_debt(store, year, is_reit=is_reit)
         constructed.compute_total_debt_incl_leases(store, year)
         constructed.compute_net_debt(store, year)
+        qoe.compute_qoe_bridge(store, ticker, year)
 
         ratios.compute_credit_ratios(store, year)      # EBITDA/debt -> leverage, coverage, FCF, liquidity
         ratios.compute_operating_ratios(store, year, prev_year)

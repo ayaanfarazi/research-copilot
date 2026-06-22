@@ -151,6 +151,35 @@ CONCEPTS: dict[str, Concept] = {
         is_flow=True,
         expected_sign="any",
     ),
+    # --- QoE add-backs (flows) ---
+    "sbc": Concept(
+        "sbc",
+        _c("ShareBasedCompensation"),
+        is_flow=True,
+        expected_sign="positive",
+    ),
+    "restructuring": Concept(
+        "restructuring",
+        _c(
+            "RestructuringCharges",
+            "RestructuringAndRelatedCosts",
+        ),
+        is_flow=True,
+        expected_sign="positive",
+    ),
+    "impairment": Concept(
+        "impairment",
+        _c(
+            "AssetImpairmentCharges",
+            "GoodwillImpairmentLoss",
+            "GoodwillImpairmentLosses",
+            "ImpairmentOfGoodwill",
+            "FiniteLivedIntangibleAssetsImpairmentLoss",
+            "ImpairmentOfIntangibleAssetsIndefinitelivedExcludingGoodwill",
+        ),
+        is_flow=True,
+        expected_sign="positive",
+    ),
     # --- Cash flow (flows) ---
     "operating_cash_flow": Concept(
         "operating_cash_flow",
