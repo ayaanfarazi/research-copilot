@@ -1,21 +1,21 @@
 """
-Credit risk scorecard (build_plan.md §7) -- the deterministic anchor for the AI view.
+Credit risk scorecard (build_plan.md §7) -- spine-driven rollup with auditable modifiers.
 
-Four dimensions, each assigned a tier from documented thresholds, rolled up to a
-single band by a VISIBLE, documented rule. The rule here is weakest-dimension-
-dominates: a credit is only as strong as its weakest pillar, which is conservative,
-credit-appropriate, and trivially explainable. The point is not a sophisticated model
--- it is an auditable verdict skeleton that the §9(A) "the view" later articulates.
+Rollup rule (Phase 1 v2):
+  - Spine = {leverage, coverage}. The band is driven by the weakest measured spine dimension.
+  - Liquidity = FLAG-ONLY (zero notches). Surfaces loudly but never moves the band.
+  - Trajectory = downgrade-only modifier, max +1 severity (built on real leverage numbers).
+  - Modifiers can ONLY worsen the band, never improve it.
 
-NO LLM is involved: the band is pure code over the computed figures (§2 number boundary).
+Spine completeness:
+  - Both spine dims not_found -> band = not_assessable (never strong).
+  - One spine dim not_found -> compute from the present one + trajectory modifier;
+    label partial_spine; cap confidence LOW; band never "strong".
 
-Severity scale shared across dimensions (higher = worse):
+Every band names its spine, modifier adjustment, and liquidity flag in notes.
+
+Severity scale (higher = worse):
   0 strong | 1 adequate | 2 stretched | 3 distressed
-The band is the MAX severity across the dimensions that HAVE data (the binding
-constraint). A dimension whose input is missing returns severity None and is
-EXCLUDED from the rollup rather than counted as distress -- "we couldn't measure
-coverage" must never masquerade as "coverage is critical". Negative earnings
-(EBITDA <= 0), by contrast, is a real distress signal and scores 3.
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ from __future__ import annotations
 from src.data.models import ComputedMetric, ConfidenceTier
 from src.metrics._common import FigureStore, weakest_tier
 
-# Map a severity integer to the band/tier display label.
 _SEVERITY_LABEL = {0: "strong", 1: "adequate", 2: "stretched", 3: "distressed"}
 
-# A tier is (severity | None, label, source figure). severity None == "no data,
-# exclude from rollup"; it is distinct from severity 3 ("measured and distressed").
-Tier = tuple[int | None, str, "ComputedMetric | None"]
+# Liquidity runway labels that trigger the refinancing-capacity flag (flag-only).
+_LIQ_FLAG_LABELS = frozenset({"tight", "acute"})
+
+Tier = tuple[int | None, str, ComputedMetric | None]
 
 
 def _tier_leverage(store: FigureStore, year: int) -> Tier:
@@ -38,7 +38,7 @@ def _tier_leverage(store: FigureStore, year: int) -> Tier:
         return None, "no data", None
     if fig.status == "net_cash":
         return 0, "net cash", fig
-    if fig.status == "not_meaningful":  # EBITDA <= 0: a real distress signal
+    if fig.status == "not_meaningful":
         return 3, "earnings negative", fig
     if fig.value is None:
         return None, "no data", fig
@@ -63,11 +63,10 @@ def _tier_coverage(store: FigureStore, year: int) -> Tier:
 
 def _tier_trajectory(store: FigureStore, year: int) -> Tier:
     """
-    Deleveraging trajectory label -> severity (trajectory alone never forces 'distressed').
+    Deleveraging trajectory -> severity for the downgrade-only modifier.
 
-    Gated by absolute leverage: a "worsening" trend off a NET-CASH base is not a credit
-    concern (the number is a negative net-leverage figure whose drift is noise), so a
-    net-cash company scores 0 here regardless of the raw trend.
+    improving=0, flat=1, worsening=2. Only worsening (sev >= 2) can add +1 to the band.
+    Net-cash issuers score 0 regardless of trend noise.
     """
     fig = store.get("deleveraging_trajectory", year)
     nl = store.get("net_leverage", year)
@@ -77,17 +76,13 @@ def _tier_trajectory(store: FigureStore, year: int) -> Tier:
     if fig is None or fig.label not in mapping:
         return None, "no data", fig
     sev = mapping[fig.label]
-    # A worsening trend only binds when leverage is already at least moderate.
-    # Off a low-leverage base (net leverage <= 2x) it's a yellow flag, not a driver,
-    # so we cap severity at "adequate" -- otherwise a lightly-levered company that
-    # added a little debt would be mislabeled "stretched".
     if nl is not None and nl.value is not None and nl.value <= 2.0:
         sev = min(sev, 1)
     return sev, fig.label, fig
 
 
 def _tier_liquidity(store: FigureStore, year: int) -> Tier:
-    """Liquidity runway label -> severity (comfortable/adequate/tight/acute)."""
+    """Liquidity runway -> severity for FLAG-ONLY surfacing (never binds the band)."""
     fig = store.get("liquidity_runway", year)
     mapping = {"comfortable": 0, "adequate": 1, "tight": 2, "acute": 3}
     if fig is None or fig.label not in mapping:
@@ -96,24 +91,65 @@ def _tier_liquidity(store: FigureStore, year: int) -> Tier:
     return sev, fig.label, fig
 
 
+def _spine_severity(leverage: Tier, coverage: Tier) -> tuple[int | None, bool, list[str]]:
+    """
+    Compute base spine severity and whether the spine is partial.
+
+    Returns (severity | None, partial_spine, missing_spine_dims).
+    """
+    spine = {"leverage": leverage[0], "coverage": coverage[0]}
+    present = {k: v for k, v in spine.items() if v is not None}
+    missing = [k for k, v in spine.items() if v is None]
+
+    if not present:
+        return None, False, missing
+
+    sev = max(present.values())
+    partial = len(present) == 1
+    if partial and sev == 0:
+        sev = 1  # partial spine never produces a "strong" band
+    return sev, partial, missing
+
+
+def _trajectory_adjustment(trajectory: Tier) -> int:
+    """Downgrade-only: worsening adds at most +1 severity; improving/flat add nothing."""
+    sev = trajectory[0]
+    if sev is None:
+        return 0
+    return 1 if sev >= 2 else 0
+
+
+def _liquidity_flag(liquidity: Tier) -> str | None:
+    """Return the explicit flag text when liquidity is tight/acute; else None."""
+    if liquidity[0] is None:
+        return None
+    if liquidity[1] in _LIQ_FLAG_LABELS:
+        return "low cash vs current maturities — verify refinancing capacity"
+    return None
+
+
 def compute_scorecard(store: FigureStore, year: int) -> ComputedMetric:
     """
-    Roll the dimension tiers up to a credit band via weakest-link, for one year.
+    Roll spine + modifiers into a credit band for one year.
 
-    Stores the four per-dimension tiers (score_*) and the final band (credit_band),
-    naming the binding dimension, any excluded (no-data) dimensions, and the rule
-    applied so the verdict is fully auditable.
+    Persists score_* per dimension and a credit_band with auditable notes naming
+    spine inputs, trajectory modifier, and liquidity flag.
     """
+    leverage = _tier_leverage(store, year)
+    coverage = _tier_coverage(store, year)
+    trajectory = _tier_trajectory(store, year)
+    liquidity = _tier_liquidity(store, year)
+
     dims = {
-        "leverage": _tier_leverage(store, year),
-        "coverage": _tier_coverage(store, year),
-        "trajectory": _tier_trajectory(store, year),
-        "liquidity": _tier_liquidity(store, year),
+        "leverage": leverage,
+        "coverage": coverage,
+        "trajectory": trajectory,
+        "liquidity": liquidity,
     }
 
-    # Persist each dimension tier as its own figure for the UI / reasoning layer.
     comps: list[ComputedMetric] = []
     for dim, (sev, label, fig) in dims.items():
+        dim_notes = ["flag-only: does not affect band"] if dim == "liquidity" else []
         if fig is not None:
             comps.append(fig)
         store.add(ComputedMetric(
@@ -124,37 +160,72 @@ def compute_scorecard(store: FigureStore, year: int) -> ComputedMetric:
             formula=f"{dim} dimension tier",
             component_ids=[fig.figure_id] if fig is not None else [],
             confidence=fig.confidence if fig is not None else ConfidenceTier.NOT_FOUND,
+            notes=dim_notes,
         ))
 
-    # Weakest-link rollup over the dimensions that actually have data.
-    measured = {dim: sev for dim, (sev, _, _) in dims.items() if sev is not None}
-    excluded = [dim for dim, (sev, _, _) in dims.items() if sev is None]
+    spine_sev, partial_spine, spine_missing = _spine_severity(leverage, coverage)
+    traj_adj = _trajectory_adjustment(trajectory)
+    liq_flag = _liquidity_flag(liquidity)
 
-    if not measured:
-        # Nothing measurable -> say so honestly, don't invent a band.
+    lev_s, cov_s = leverage[0], coverage[0]
+    spine_note = (
+        f"spine: leverage={leverage[1]} (sev {lev_s if lev_s is not None else 'n/a'}), "
+        f"coverage={coverage[1]} (sev {cov_s if cov_s is not None else 'n/a'})"
+    )
+
+    if spine_sev is None:
+        notes = [
+            spine_note,
+            "trajectory modifier: none (spine not assessable)",
+            f"liquidity flag: {liq_flag or 'none'} ({liquidity[1]})",
+            "rule: spine-driven; both leverage and coverage missing -> not_assessable",
+        ]
         return store.add(ComputedMetric(
             name="credit_band", figure_id=store.id("credit_band", year),
-            value=None, status="not_found", label="insufficient_data",
-            formula="weakest-dimension-dominates (no measurable dimensions)",
+            value=None, status="not_found", label="not_assessable",
+            formula="spine-driven rollup (insufficient spine data)",
             component_ids=[store.id(f"score_{d}", year) for d in dims],
             confidence=ConfidenceTier.NOT_FOUND,
-            notes=["no credit dimension had data; band not assessable"],
+            notes=notes,
         ))
 
-    band_sev = max(measured.values())
-    binding = [dim for dim, sev in measured.items() if sev == band_sev]
+    raw_spine = max(v for v in (lev_s, cov_s) if v is not None)
+    final_sev = min(3, spine_sev + traj_adj)
+    band_label = _SEVERITY_LABEL[final_sev]
+
+    traj_desc = trajectory[1] if trajectory[0] is not None else "no data"
+    if traj_adj:
+        modifier_note = f"trajectory modifier: +{traj_adj} ({traj_desc})"
+    else:
+        modifier_note = f"trajectory modifier: none ({traj_desc})"
+
+    liq_note = (
+        f"liquidity flag: {liq_flag} ({liquidity[1]})"
+        if liq_flag else f"liquidity flag: none ({liquidity[1]})"
+    )
+
     notes = [
-        f"binding dimension(s): {', '.join(binding)}",
-        "rule: weakest-dimension-dominates (band = worst measured dimension)",
+        f"{spine_note} -> spine severity {raw_spine}"
+        + (" (capped to adequate: partial_spine)" if partial_spine and raw_spine == 0 else ""),
+        modifier_note,
+        liq_note,
+        "rule: spine=weakest-link(leverage,coverage); liquidity flag-only; trajectory downgrade-only max +1",
     ]
-    if excluded:
-        notes.append(f"excluded (no data): {', '.join(excluded)}")
+    if partial_spine:
+        notes.append(
+            f"partial_spine: missing {', '.join(spine_missing)}; confidence capped LOW; band never strong"
+        )
+
+    spine_figs = [f for f in (leverage[2], coverage[2]) if f is not None]
+    conf = weakest_tier(*spine_figs, *( [trajectory[2]] if traj_adj and trajectory[2] else [] ))
+    if partial_spine and conf in (ConfidenceTier.VERIFIED, ConfidenceTier.HIGH):
+        conf = ConfidenceTier.LOW
 
     return store.add(ComputedMetric(
         name="credit_band", figure_id=store.id("credit_band", year),
-        value=float(band_sev), label=_SEVERITY_LABEL[band_sev], unit="severity(0-3)",
-        formula="weakest-dimension-dominates over measured {leverage, coverage, trajectory, liquidity}",
+        value=float(final_sev), label=band_label, unit="severity(0-3)",
+        formula="spine weakest-link + trajectory downgrade-only (liquidity flag-only)",
         component_ids=[store.id(f"score_{d}", year) for d in dims],
-        confidence=weakest_tier(*comps),
+        confidence=conf,
         notes=notes,
     ))

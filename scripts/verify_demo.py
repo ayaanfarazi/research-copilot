@@ -55,8 +55,50 @@ MSFT_GOLDEN = {
 }
 
 # Revenue values observed directly in the raw companyfacts payloads (structural dump).
+# NOTE: these are CIRCULAR oracles -- read from the same payload the resolver reads, so
+# they only prove dedup is self-consistent, not that the picked fact is correct. The
+# independent golden sets below (hand-pulled from the 10-K PDF) are the real oracle.
 TGT_REVENUE = {2024: 106_566_000_000, 2025: 104_780_000_000}  # FY label = our convention
 VZ_REVENUE = {2025: 138_191_000_000}
+
+# =====================================================================================
+# INDEPENDENT GOLDEN SETS -- HAND-PULL FROM THE ACTUAL 10-K PDF. DO NOT fill from the
+# payload (that recreates the circularity). Values are reported in MILLIONS in both
+# filings, so enter FULL DOLLARS (e.g. "$25,920" million -> 25_920_000_000). The
+# comparison tolerance below absorbs millions-rounding. Replace each None, then re-run.
+# =====================================================================================
+
+# VZ (Verizon) FY2024 -- levered oracle.
+#   Filing: 10-K, accession 0000732712-25-000006, period of report 2024-12-31.
+VZ_GOLDEN_FY = 2024
+VZ_GOLDEN = {
+    "revenue": 134_788_000_000,             # Consolidated Statements of Income -> "Total operating revenues"
+    "operating_income": 28_686_000_000,    # -> "Operating income"
+    "net_income": 17_506_000_000,          # -> "Net income attributable to Verizon" (NOT the consolidated incl. noncontrolling line)
+    "operating_cash_flow": 36_912_000_000, # Statements of Cash Flows -> "Net cash provided by operating activities"
+    "capex": 17_090_000_000,               # Statements of Cash Flows -> "Capital expenditures (including capitalized software)"
+    "cash": 4_194_000_000,                # Balance Sheet -> "Cash and cash equivalents"
+    "equity": 99_237_000_000,              # Balance Sheet -> "Total equity attributable to Verizon" (exclude noncontrolling interests)
+    "debt_current": 22_633_000_000,        # Balance Sheet -> "Debt maturing within one year"
+    "debt_noncurrent": 121_381_000_000,     # Balance Sheet -> "Long-term debt"
+    "total_debt": 144_014_000_000,          # = debt_current + debt_noncurrent (enter the sum you computed)
+}
+
+# MCD (McDonald's) FY2024 -- negative-equity + debt-scope oracle (exercises B2 and B4).
+#   Filing: 10-K, accession 0000063908-25-000012, period of report 2024-12-31.
+MCD_GOLDEN_FY = 2024
+MCD_GOLDEN = {
+    "revenue": 25_920_000_000,             # Consolidated Statements of Income -> "Total revenues"
+    "operating_income": 11_712_000_000,    # -> "Operating income"
+    "net_income": 8_223_000_000,          # -> "Net income"
+    "cash": 1_085_000_000,                # Balance Sheet -> "Cash and equivalents"
+    "operating_cash_flow": 9_447_000_000, # Statements of Cash Flows -> "Cash provided by operations"
+    "capex": 2_775_000_000,               # Statements of Cash Flows -> "Capital expenditures"
+    "equity": -3_797_000_000,              # Balance Sheet -> "Total shareholders' equity (deficit)"  (a NEGATIVE number)
+    "debt_noncurrent": 38_424_000_000,     # Balance Sheet -> "Long-term debt" (the noncurrent line)
+    "debt_current": 0,        # Balance Sheet -> "Current maturities of long-term debt"
+    "total_debt": 38_424_000_000,          # = debt_noncurrent + debt_current  (the B4 oracle: MUST include the current portion)
+}
 
 
 class Checks:
@@ -147,19 +189,22 @@ def verify_vz(ck: Checks) -> None:
     ck.check(cov.value is not None, "interest coverage computed (tag-switch handled)",
              f"coverage={cov.value:.1f}x" if cov.value else "n/a")
     band = cf.get("credit_band", y)
-    ck.check(band.label != "strong", "credit band reflects leverage (not 'strong')",
+    ck.check(band.label == "adequate",
+             "credit band = adequate (spine-driven: leverage adequate / coverage strong)",
              f"got {band.label}")
 
-    # Spot-check #1: print every dimension and confirm WHICH one binds the band.
+    # Spot-check #1: print every dimension and confirm liquidity does NOT bind the band.
     print("    per-dimension tiers (severity 0=strong .. 3=distressed):")
     for d in ("leverage", "coverage", "trajectory", "liquidity"):
         s = cf.get(f"score_{d}", y)
         print(f"      {d:11} sev={s.value} ({s.label})")
-    binding = next((n for n in band.notes if n.startswith("binding")), "")
-    # Liquidity must be the binder: trajectory is only 'flat' (sev 1), so this is a
-    # genuine cash-vs-near-term-maturities reading, not the old worsening-trend bug.
-    ck.check("liquidity" in binding, "binding dimension is liquidity (not a trend-bug residual)",
-             binding)
+    notes_text = " | ".join(band.notes)
+    ck.check("liquidity flag-only" in notes_text or "liquidity flag:" in notes_text,
+             "band notes name liquidity flag (flag-only rule)", notes_text)
+    ck.check("binding" not in notes_text.lower() or "liquidity" not in notes_text.lower(),
+             "liquidity is NOT a binding dimension", notes_text)
+    ck.check(any("verify refinancing capacity" in n for n in band.notes),
+             "liquidity flag surfaces for tight runway", " | ".join(band.notes))
     liq, dc = cf.get("liquidity", y), cf.get("debt_current", y)
     ck.check(liq.value is not None and dc.value is not None,
              "liquidity & current-debt both read from real tags (runway not synthetic)",
@@ -258,6 +303,33 @@ def verify_da_consistency(ck: Checks) -> None:
              f"{component_sets}")
 
 
+def verify_independent_goldens(ck: Checks) -> None:
+    """
+    Compare the pipeline against values HAND-PULLED from the 10-K PDF (non-circular).
+
+    Skips cleanly (and says so) for any golden set still left as None, so the harness
+    stays green until you fill them, then becomes a real oracle for B2/B4.
+    """
+    for tk, fy, gold in [("VZ", VZ_GOLDEN_FY, VZ_GOLDEN), ("MCD", MCD_GOLDEN_FY, MCD_GOLDEN)]:
+        filled = {k: v for k, v in gold.items() if v is not None}
+        if not filled:
+            print(f"\n[{tk} FY{fy} independent golden] NOT POPULATED -- fill from the 10-K PDF, then re-run (skipped)")
+            continue
+        print(f"\n[{tk} FY{fy} independent golden -- hand-pulled from 10-K, non-circular]")
+        cf = build_financials(tk, years=5)
+        for concept, golden in filled.items():
+            fig = cf.get(concept, fy)
+            v = fig.value if fig else None
+            tol = max(_TOL, abs(golden) * 5e-4)  # absorbs millions-rounding from the PDF
+            ok = v is not None and abs(v - golden) <= tol
+            ck.check(ok, f"{tk} {concept} FY{fy}", f"{_num(v)} vs {_num(golden)}")
+        if tk == "MCD":
+            roe = cf.get("roe", fy)
+            ck.check(roe is not None and roe.status == "not_meaningful",
+                     "MCD ROE -> not_meaningful (negative book equity, B2)",
+                     f"status={roe.status if roe else None}")
+
+
 def verify_not_found(ck: Checks) -> None:
     print("\n[not-found discipline]")
     nf = resolver.resolve({}, "revenue", 2024, 6)
@@ -275,6 +347,7 @@ def run() -> bool:
     verify_wmt_labeling(ck)
     verify_partial_missing(ck)
     verify_da_consistency(ck)
+    verify_independent_goldens(ck)
     verify_not_found(ck)
     print("\n" + "=" * 70)
     print("ALL CHECKS PASSED" if ck.passed else "SOME CHECKS FAILED")

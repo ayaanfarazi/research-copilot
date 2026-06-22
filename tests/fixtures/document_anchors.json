@@ -1,0 +1,18 @@
+{
+  "MSFT": {
+    "item_1": ["cloud", "platform"],
+    "item_7": ["revenue", "operating income"]
+  },
+  "VZ": {
+    "item_1a": ["network", "competition"]
+  },
+  "MCD": {
+    "item_1": ["franchised", "restaurant"]
+  },
+  "NVDA": {
+    "item_7": ["data center"]
+  },
+  "CRM": {
+    "item_7": ["subscription", "remaining performance obligation"]
+  }
+}

@@ -142,6 +142,12 @@ class CompanyFinancials(BaseModel):
     # Banks/insurers don't fit the industrial credit framing (no OperatingIncomeLoss,
     # "revenue" = net interest income, etc.), so the credit panel is degraded for them.
     is_financial: bool = False
+    # Overall coverage status. "ok" means we built a normal panel. The others are
+    # explicit graceful-degradation outcomes (never a crash): a filer with no usable
+    # us-gaap annual data still returns a CompanyFinancials, just an empty one that
+    # says WHY. See pipeline.build_financials.
+    status: Literal["ok", "no_usgaap_data", "foreign_filer_20f", "no_annual_periods"] = "ok"
+    status_detail: str | None = None
     fiscal_years: list[int] = Field(default_factory=list)  # ascending, e.g. [2020, 2021, ...]
     figures: dict[str, Figure] = Field(default_factory=dict)
 

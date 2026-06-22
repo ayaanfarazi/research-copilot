@@ -28,11 +28,14 @@ from src.data.models import ConfidenceTier, ResolvedFact, make_figure_id
 
 def _facts_for_tag(us_gaap: dict, tag: str, unit_pref: str) -> tuple[list[dict], str | None]:
     """
-    Return (facts, unit) for a tag, preferring the concept's expected unit bucket.
+    Return (facts, unit) for a tag, locked to the concept's expected unit bucket.
 
     companyfacts groups a tag's values by unit ("USD", "shares", "USD/shares", ...).
-    We want the bucket matching the concept; if it's missing we fall back to the
-    first available bucket so an unusual filer still resolves (the unit is recorded).
+    We take ONLY the bucket matching the concept. We deliberately do NOT fall back to
+    "whatever bucket exists" (B6): a USD concept must never silently consume an EUR/GBP
+    value as if it were USD -- we have no FX layer, so that would be a wrong number. If
+    the preferred unit is absent the tag yields nothing here, and resolve_series records
+    an explicit reason on the not_found.
     """
     node = us_gaap.get(tag)
     if not node:
@@ -40,9 +43,19 @@ def _facts_for_tag(us_gaap: dict, tag: str, unit_pref: str) -> tuple[list[dict],
     units = node.get("units", {})
     if unit_pref in units:
         return units[unit_pref], unit_pref
-    # Fallback: take whatever single unit bucket exists.
-    first_unit = next(iter(units), None)
-    return (units.get(first_unit, []), first_unit) if first_unit else ([], None)
+    return [], None
+
+
+def _unit_mismatch_reason(us_gaap: dict, concept_def) -> str | None:
+    """If a candidate tag exists but only in a non-preferred unit, explain why we abstained."""
+    pref = concept_def.unit
+    for cand in concept_def.candidates:
+        node = us_gaap.get(cand.tag)
+        if node:
+            unit_keys = list(node.get("units", {}).keys())
+            if unit_keys and pref not in unit_keys:
+                return f"{cand.tag} reported only in {unit_keys}, not {pref}; abstained (no FX conversion)"
+    return None
 
 
 def _sign_note(concept: str, value: float | None) -> list[str]:
@@ -57,7 +70,7 @@ def _sign_note(concept: str, value: float | None) -> list[str]:
     return []
 
 
-def _not_found(concept: str, year: int) -> ResolvedFact:
+def _not_found(concept: str, year: int, reason: str | None = None) -> ResolvedFact:
     """Build the explicit not-found figure (§6 component 4) instead of returning None/0."""
     return ResolvedFact(
         concept=concept,
@@ -65,7 +78,7 @@ def _not_found(concept: str, year: int) -> ResolvedFact:
         value=None,
         fiscal_year=year,
         confidence=ConfidenceTier.NOT_FOUND,
-        notes=["no candidate tag returned a value for this year"],
+        notes=[reason or "no candidate tag returned a value for this year"],
     )
 
 
@@ -94,8 +107,10 @@ def resolve_series(
             per_tag[cand.tag] = (by_year, used_unit, rank)
 
     if not per_tag:
-        # Concept entirely absent for this filer -> every year is not-found.
-        return {y: _not_found(concept, y) for y in years}
+        # Concept entirely absent (or present only in a non-preferred unit) for this
+        # filer -> every year is not-found, with a unit reason when that's the cause.
+        reason = _unit_mismatch_reason(us_gaap, concept_def)
+        return {y: _not_found(concept, y, reason) for y in years}
 
     # Step 2: choose the anchor tag from the LATEST requested year, walking candidates
     # in priority order so the most-preferred tag that actually has the latest year wins.

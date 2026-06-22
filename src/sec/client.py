@@ -97,6 +97,47 @@ def get_company_facts(cik: str) -> dict:
     return get_json(url)
 
 
+def get_filing_html(url: str, use_cache: bool = True) -> str:
+    """
+    Fetch a 10-K HTML filing from the EDGAR archives and return its text.
+
+    SEAM 2: uses the same _throttle() and User-Agent pattern as get_json().
+    Cache key = MD5(url), extension = .html (not .json). Returns response.text;
+    does not call response.json().
+
+    Args:
+        url:       Full EDGAR archive URL for the primary filing document.
+        use_cache: If True, return cached HTML when available.
+
+    Returns:
+        Raw HTML string.
+    """
+    cache_file = config.CACHE_DIR / f"{hashlib.md5(url.encode()).hexdigest()}.html"
+
+    if use_cache and cache_file.exists():
+        return cache_file.read_text(encoding="utf-8", errors="replace")
+
+    _throttle()
+
+    headers = {"User-Agent": config.SEC_USER_AGENT}
+    response = requests.get(url, headers=headers, timeout=60)
+
+    if response.status_code == 403:
+        raise requests.HTTPError(
+            f"SEC returned 403 Forbidden for {url}\n"
+            f"Check that SEC_USER_AGENT in .env is set to a real name and email."
+        )
+    response.raise_for_status()
+
+    html = response.text
+
+    if use_cache:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(html, encoding="utf-8")
+
+    return html
+
+
 def get_submissions(cik: str) -> dict:
     """
     Fetch a company's submissions metadata from the SEC submissions API.

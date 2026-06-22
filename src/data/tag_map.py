@@ -182,6 +182,13 @@ CONCEPTS: dict[str, Concept] = {
         [
             TagCandidate("LongTermDebt", scope="total"),
             TagCandidate("DebtLongtermAndShorttermCombinedAmount", scope="total"),
+            # Combined debt + capital/finance leases TOTAL (current + noncurrent), e.g.
+            # MPLX reports DebtAndCapitalLeaseObligations = 26.0B as the consolidated total.
+            TagCandidate("DebtAndCapitalLeaseObligations", scope="total"),
+            # Many REITs (e.g. Realty Income post-2016) report consolidated debt under
+            # NotesPayable rather than LongTermDebt. Lowest priority -> resolves only when
+            # no standard total/noncurrent tag exists, and lands at LOW confidence (rank 3+).
+            TagCandidate("NotesPayable", scope="total"),
         ],
         is_flow=False,
         expected_sign="positive",
@@ -201,7 +208,15 @@ CONCEPTS: dict[str, Concept] = {
     ),
     "debt_noncurrent": Concept(
         "debt_noncurrent",
-        [TagCandidate("LongTermDebtNoncurrent", scope="noncurrent_only")],
+        [
+            TagCandidate("LongTermDebtNoncurrent", scope="noncurrent_only"),
+            # Filers that fold capital/finance leases into the debt line report the
+            # NONCURRENT long-term portion here (e.g. Verizon FY2024 = 121,381M; the
+            # current portion is the separate ...Current tag in debt_current). The B4
+            # reconciliation confirms noncurrent + current == the total tag, so this
+            # isolates noncurrent without double-counting.
+            TagCandidate("LongTermDebtAndCapitalLeaseObligations", scope="noncurrent_only"),
+        ],
         is_flow=False,
         expected_sign="positive",
     ),
@@ -228,14 +243,32 @@ CONCEPTS: dict[str, Concept] = {
     "liabilities": Concept(
         "liabilities", _c("Liabilities"), is_flow=False, expected_sign="positive"
     ),
+    # Equity = book equity ATTRIBUTABLE TO THE PARENT (excludes noncontrolling interest),
+    # which is the right denominator for ROE. We deliberately keep ONLY the attributable
+    # tag here. Many filers (e.g. Verizon) report no `StockholdersEquity` tag at all and
+    # only carry the incl-NCI total; for them the pipeline DERIVES attributable equity as
+    # `equity_incl_nci - minority_interest` (see pipeline) rather than letting the incl-NCI
+    # total leak in and overstate equity.
     "equity": Concept(
         "equity",
-        _c(
-            "StockholdersEquity",
-            "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
-        ),
+        _c("StockholdersEquity"),
         is_flow=False,
         expected_sign="any",  # can be negative for highly levered / deficit equity firms
+    ),
+    # Total equity INCLUDING noncontrolling interest, and the NCI itself. These exist only
+    # to derive attributable equity when `StockholdersEquity` is absent; they are not used
+    # directly as the equity denominator anywhere.
+    "equity_incl_nci": Concept(
+        "equity_incl_nci",
+        _c("StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
+        is_flow=False,
+        expected_sign="any",
+    ),
+    "minority_interest": Concept(
+        "minority_interest",
+        _c("MinorityInterest"),
+        is_flow=False,
+        expected_sign="any",  # usually positive; can be negative in rare deficit cases
     ),
     "op_lease_liab_current": Concept(
         "op_lease_liab_current",
@@ -246,6 +279,24 @@ CONCEPTS: dict[str, Concept] = {
     "op_lease_liab_noncurrent": Concept(
         "op_lease_liab_noncurrent",
         _c("OperatingLeaseLiabilityNoncurrent"),
+        is_flow=False,
+        expected_sign="positive",
+    ),
+    "finance_lease_liab_current": Concept(
+        "finance_lease_liab_current",
+        _c(
+            "FinanceLeaseLiabilityCurrent",
+            "CapitalLeaseObligationsCurrent",
+        ),
+        is_flow=False,
+        expected_sign="positive",
+    ),
+    "finance_lease_liab_noncurrent": Concept(
+        "finance_lease_liab_noncurrent",
+        _c(
+            "FinanceLeaseLiabilityNoncurrent",
+            "CapitalLeaseObligationsNoncurrent",
+        ),
         is_flow=False,
         expected_sign="positive",
     ),

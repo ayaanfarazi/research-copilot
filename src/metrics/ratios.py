@@ -81,17 +81,32 @@ def compute_operating_ratios(store: FigureStore, year: int, prev_year: int | Non
                   "(revenue_t - revenue_t-1) / revenue_t-1", [rev, prev_rev], "%")
 
     # ROE = net income / average equity (ending equity if no prior year, flagged).
+    # Negative/zero book equity (buyback-heavy or deficit names) makes ROE defined but
+    # meaningless -- a "+15,000% ROE" off tiny negative equity actively misleads. Same
+    # category as leverage on negative EBITDA, so we route it through the SAME
+    # not_meaningful path (require_positive_den) rather than inventing a new flag (B2).
     prev_eq = store.get("equity", prev_year) if prev_year is not None else None
     notes: list[str] = []
     if eq is not None and eq.value is not None:
+        eq_inputs = [eq.value]
         if prev_eq is not None and prev_eq.value is not None:
             denom = (eq.value + prev_eq.value) / 2
+            eq_inputs.append(prev_eq.value)
         else:
             denom = eq.value
             notes.append("ROE uses ending equity (no prior-year equity for an average)")
-        val, status = safe_div(ni.value if ni else None, denom)
-        _register(store, "roe", year, (val * 100 if val is not None else None), status,
-                  "net_income / average equity", [ni, eq, prev_eq], "%", notes)
+        # ROE is not meaningful if ANY equity endpoint is <= 0: averaging a negative
+        # against a positive can yield a tiny/near-zero denominator that explodes ROE
+        # to a nonsense figure (e.g. ABBV's +15,000%). Catch the endpoint, not just the
+        # average, and route through the not_meaningful path (same category as neg-EBITDA).
+        if any(e <= 0 for e in eq_inputs):
+            notes.append("book equity <= 0 in the averaging window: ROE not meaningful")
+            _register(store, "roe", year, None, "not_meaningful",
+                      "net_income / average equity", [ni, eq, prev_eq], "%", notes)
+        else:
+            val, status = safe_div(ni.value if ni else None, denom, require_positive_den=True)
+            _register(store, "roe", year, (val * 100 if val is not None else None), status,
+                      "net_income / average equity", [ni, eq, prev_eq], "%", notes)
 
 
 def compute_revenue_cagr(store: FigureStore, years: list[int]) -> None:

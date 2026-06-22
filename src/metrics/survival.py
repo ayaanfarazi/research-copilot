@@ -37,6 +37,8 @@ def _series(store: FigureStore, name: str, years: list[int]) -> list[tuple[int, 
 
 def compute_deleveraging_trajectory(store: FigureStore, years: list[int]) -> None:
     """Direction of net leverage from the earliest to the latest usable year."""
+    if not years:  # defensive guard (B1): never index an empty window
+        return
     series = _series(store, "net_leverage", years)
     last_year = years[-1]
     if len(series) < 2:
@@ -68,6 +70,8 @@ def compute_deleveraging_trajectory(store: FigureStore, years: list[int]) -> Non
 
 def compute_coverage_durability(store: FigureStore, years: list[int]) -> None:
     """Trend in interest coverage -- flags thinning coverage even when leverage is flat."""
+    if not years:  # defensive guard (B1): never index an empty window
+        return
     series = _series(store, "interest_coverage", years)
     last_year = years[-1]
     if len(series) < 2:

@@ -16,6 +16,14 @@ from src.metrics._common import FigureStore, weakest_tier
 
 _DA_COMPONENTS = ("depreciation", "amortization_intangibles")
 
+# Strength rank (lower = stronger) for capping confidence on an indeterminate result.
+_TIER_RANK = {
+    ConfidenceTier.VERIFIED: 0,
+    ConfidenceTier.HIGH: 1,
+    ConfidenceTier.LOW: 2,
+    ConfidenceTier.NOT_FOUND: 3,
+}
+
 
 def da_plan(store: FigureStore, years: list[int]) -> dict:
     """
@@ -28,6 +36,8 @@ def da_plan(store: FigureStore, years: list[int]) -> dict:
     reference, so any year whose components differ can be flagged -- the same way tag
     switches are flagged -- rather than silently changing the EBITDA build mid-series.
     """
+    if not years:  # defensive: callers should never pass an empty window (see pipeline B1 guard)
+        return {"method": "composed", "ref_components": set()}
     latest = years[-1]
     agg = store.get("dep_amort", latest)
     if agg is not None and agg.value is not None:
@@ -150,22 +160,106 @@ def compute_ebitda(store: FigureStore, year: int, plan: dict) -> ComputedMetric:
     )
 
 
-def compute_total_debt(store: FigureStore, year: int, with_leases: bool = False) -> ComputedMetric:
+_DEBT_REL_TOL = 0.01  # 1% band for "tag A ≈ tag B" reconciliation
+
+
+def _reconcile_total_debt(total, nc, cur):
+    """
+    Verify a scope="total" tag actually IS a total, and correct it if it isn't (B4).
+
+    Some filers tag `LongTermDebt` as the NONCURRENT-only balance (it equals
+    `LongTermDebtNoncurrent`) while reporting the current portion separately -- e.g.
+    McDonald's. Trusting the scope label then UNDER-states total debt at high confidence.
+    We disambiguate against the noncurrent and current tags:
+
+    Returns (value, formula, components, notes, ambiguous).
+    """
+    tv = total.value
+    ncv = nc.value if (nc is not None and nc.value is not None) else None
+    curv = cur.value if (cur is not None and cur.value is not None) else None
+
+    if ncv is None:
+        # No noncurrent tag to cross-check against -> trust the total tag as-is.
+        return tv, "debt_total", [total], [], False
+
+    approx_nc = abs(tv - ncv) <= _DEBT_REL_TOL * max(abs(tv), abs(ncv), 1.0)
+
+    if approx_nc and curv is not None and curv > 0 and tv < ncv + curv:
+        # Only add a separate current portion when it represents balance-sheet
+        # near-term maturities (DebtCurrent / ShortTermBorrowings / lease-current tags).
+        # LongTermDebtCurrent ALONE, with tv ≈ ncv, often captures sub-components
+        # reclassified INTO the long-term line (MCD FY2025 10-K: $725M reclassified
+        # to long-term; BS current-maturities line is a dash — not additive).
+        cur_tag = cur.tag if cur is not None else None
+        if cur_tag == "LongTermDebtCurrent":
+            return (
+                tv,
+                "debt_total",
+                [total],
+                [f"{total.tag} ≈ {nc.tag}; {cur_tag} present but reclassified into "
+                 f"long-term (not added on top of {total.tag})"],
+                False,
+            )
+        return (
+            tv + curv,
+            "debt_total(reclassified noncurrent-only) + debt_current",
+            [total, cur],
+            [f"{total.tag} == {nc.tag} but a current portion exists ({cur.tag}); treated "
+             f"{total.tag} as noncurrent-only and ADDED the current portion (corrected, not double-counted)"],
+            False,
+        )
+    if curv is not None and abs(tv - (ncv + curv)) <= _DEBT_REL_TOL * max(abs(tv), 1.0):
+        # Genuine total (≈ noncurrent + current), e.g. AAPL/INTC -> leave as-is.
+        return tv, "debt_total", [total], [f"{total.tag} confirmed as a true total (≈ noncurrent + current)"], False
+    if approx_nc and (curv is None or curv == 0):
+        # Looks noncurrent-only but no current tag to add -> use as-is, note the limit.
+        return tv, "debt_total", [total], [f"{total.tag} ≈ {nc.tag}; no current-debt tag found, used as-is"], False
+    # Can't reconcile -> keep the total tag but flag and lower confidence.
+    return tv, "debt_total", [total], [f"could not reconcile {total.tag} against noncurrent+current; used as-is"], True
+
+
+def compute_total_debt(
+    store: FigureStore, year: int, *, is_reit: bool = False, with_leases: bool = False
+) -> ComputedMetric:
     """
     Total debt, scope-aware so overlapping tags are never summed (§7).
 
-    Preference: a single `debt_total` tag if present; else current_only + noncurrent_only.
-    A missing current-debt tag is treated as 0 (companies with no current maturities
-    legitimately omit it) but the assumption is written into notes -- not silent.
-    Operating leases are excluded by default; `with_leases=True` adds them.
+    Preference: a single `debt_total` tag if present (verified/corrected for scope via
+    _reconcile_total_debt, B4); else current_only + noncurrent_only. A missing
+    current-debt tag is treated as 0 (companies with no current maturities legitimately
+    omit it) but the assumption is written into notes -- not silent. Operating leases
+    are excluded by default; `with_leases=True` adds them.
     """
     notes: list[str] = []
+    ambiguous = False
     total = store.get("debt_total", year)
 
+    # REITs often tag only the senior-notes line as NotesPayable (~$23B for O) while
+    # total debt per the 10-K footnote includes term loans, CP, mortgage, etc (~$26B).
+    # A partial number is worse than honest abstention (B5a).
+    if is_reit and total is not None and total.tag == "NotesPayable":
+        return store.add(
+            ComputedMetric(
+                name="total_debt",
+                figure_id=store.id("total_debt", year),
+                value=None,
+                status="not_found",
+                unit="USD",
+                formula="debt_total",
+                component_ids=[total.figure_id],
+                confidence=ConfidenceTier.NOT_FOUND,
+                notes=[
+                    "total debt not reported: NotesPayable is notes-only for this REIT, "
+                    "not consolidated total debt (see 10-K debt footnote)"
+                ],
+            )
+        )
+
     if total is not None and total.value is not None:
-        value = total.value
-        components = [total]
-        formula = "debt_total"
+        nc_chk = store.get("debt_noncurrent", year)
+        cur_chk = store.get("debt_current", year)
+        value, formula, components, dnotes, ambiguous = _reconcile_total_debt(total, nc_chk, cur_chk)
+        notes += dnotes
     else:
         cur = store.get("debt_current", year)
         non = store.get("debt_noncurrent", year)
@@ -205,6 +299,9 @@ def compute_total_debt(store: FigureStore, year: int, with_leases: bool = False)
     else:
         notes.append("operating leases excluded (default)")
 
+    conf = weakest_tier(*components)
+    if ambiguous and _TIER_RANK[conf] < _TIER_RANK[ConfidenceTier.LOW]:
+        conf = ConfidenceTier.LOW  # indeterminate scope reconciliation -> cap trust at LOW
     return store.add(
         ComputedMetric(
             name="total_debt",
@@ -213,7 +310,90 @@ def compute_total_debt(store: FigureStore, year: int, with_leases: bool = False)
             unit="USD",
             formula=formula,
             component_ids=[c.figure_id for c in components],
-            confidence=weakest_tier(*components),
+            confidence=conf,
+            notes=notes,
+        )
+    )
+
+
+def compute_total_debt_incl_leases(store: FigureStore, year: int) -> ComputedMetric:
+    """
+    Option D: total debt plus operating and finance lease liabilities.
+
+    Keeps `total_debt` as debt-tags-only; this metric adds lease liabilities explicitly.
+    When the lease-inclusive noncurrent tag won't reconcile with the debt total (HD/AAL/MPLX
+    pattern), confidence is capped LOW and the note names the mismatch.
+    """
+    td = store.get("total_debt", year)
+    if td is None or td.value is None:
+        return store.add(
+            ComputedMetric(
+                name="total_debt_incl_leases",
+                figure_id=store.id("total_debt_incl_leases", year),
+                value=None,
+                status="not_found",
+                unit="USD",
+                formula="total_debt + operating lease liabilities + finance lease liabilities",
+                confidence=ConfidenceTier.NOT_FOUND,
+                notes=["total_debt_incl_leases not computable: total_debt missing"],
+            )
+        )
+
+    value = td.value
+    components: list = [td]
+    lease_parts: list[str] = []
+    for concept, label in (
+        ("finance_lease_liab_current", "finance lease current"),
+        ("finance_lease_liab_noncurrent", "finance lease noncurrent"),
+        ("op_lease_liab_current", "operating lease current"),
+        ("op_lease_liab_noncurrent", "operating lease noncurrent"),
+    ):
+        fig = store.get(concept, year)
+        if fig is not None and fig.value is not None and fig.value > 0:
+            value += fig.value
+            components.append(fig)
+            lease_parts.append(label)
+
+    notes: list[str] = ["Option D: total_debt (debt tags only) + explicit lease liabilities"]
+    if lease_parts:
+        notes.append("lease liabilities added: " + ", ".join(lease_parts))
+    else:
+        notes.append("no lease liability tags found; equals total_debt")
+
+    reconcile_low = any("could not reconcile" in n for n in (td.notes or []))
+    nc = store.get("debt_noncurrent", year)
+    if (
+        not reconcile_low
+        and nc is not None
+        and nc.tag == "LongTermDebtAndCapitalLeaseObligations"
+        and nc.value is not None
+    ):
+        cur = store.get("debt_current", year)
+        curv = cur.value if (cur is not None and cur.value is not None) else 0.0
+        raw = store.get("debt_total", year)
+        if raw is not None and raw.value is not None:
+            combined = nc.value + curv
+            if abs(raw.value - combined) > _DEBT_REL_TOL * max(abs(raw.value), abs(combined), 1.0):
+                if abs(raw.value - nc.value) > _DEBT_REL_TOL * max(abs(raw.value), abs(nc.value), 1.0):
+                    reconcile_low = True
+                    notes.append(
+                        f"lease-inclusive noncurrent tag ({nc.tag}={nc.value:,.0f}) does not "
+                        f"reconcile with total_debt ({raw.value:,.0f}); confidence LOW"
+                    )
+
+    conf = weakest_tier(*components)
+    if reconcile_low and _TIER_RANK[conf] < _TIER_RANK[ConfidenceTier.LOW]:
+        conf = ConfidenceTier.LOW
+
+    return store.add(
+        ComputedMetric(
+            name="total_debt_incl_leases",
+            figure_id=store.id("total_debt_incl_leases", year),
+            value=value,
+            unit="USD",
+            formula="total_debt + finance lease liabilities + operating lease liabilities",
+            component_ids=[c.figure_id for c in components],
+            confidence=conf,
             notes=notes,
         )
     )
