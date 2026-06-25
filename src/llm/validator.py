@@ -43,6 +43,20 @@ def _collapse_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip())
 
 
+def _fold_typographic(s: str) -> str:
+    # Folds only this fixed set of typographic variants to ASCII equivalents.
+    # Used exclusively on the excerpt-in-source membership path — never called
+    # from _check_numeric_tokens or any other numeric-scanning code.
+    for old, new in (
+        ("‘", "'"), ("’", "'"),  # left / right single quotation mark
+        ("“", '"'), ("”", '"'),  # left / right double quotation mark
+        ("—", "-"), ("–", "-"),  # em dash / en dash
+        (" ", " "),                   # non-breaking space
+    ):
+        s = s.replace(old, new)
+    return s
+
+
 def _check_numeric_tokens(
     text: str,
     allowlist: EnumeratedAllowlist,
@@ -97,7 +111,10 @@ def validate_output(
                 exc = obj.excerpt
                 ref = obj.ref
                 section = document.sections.get(ref, "") if document else ""
-                if not section or _collapse_ws(exc) not in _collapse_ws(section):
+                if not section or (
+                    _fold_typographic(_collapse_ws(exc))
+                    not in _fold_typographic(_collapse_ws(section))
+                ):
                     violations.append(ValidationViolation(
                         field_path=f"{path}.excerpt", raw_token="", canonical="",
                         reason="excerpt_not_in_source",
@@ -118,7 +135,10 @@ def validate_output(
                 ref = obj.get("ref", "")
                 section = document.sections.get(ref, "") if document else ""
                 exc = obj["excerpt"]
-                if not section or _collapse_ws(exc) not in _collapse_ws(section):
+                if not section or (
+                    _fold_typographic(_collapse_ws(exc))
+                    not in _fold_typographic(_collapse_ws(section))
+                ):
                     violations.append(ValidationViolation(
                         field_path=f"{path}.excerpt", raw_token="", canonical="",
                         reason="excerpt_not_in_source",
