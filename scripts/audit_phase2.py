@@ -20,6 +20,7 @@ from src.llm.normalize import normalize_numeric_token
 from src.llm.schemas.citations import Citation
 from src.llm.validator import validate_output, validate_text
 from src.metrics.qoe import build_qoe_bridge_from_figures
+from config import DEMO_PINS
 from src.pipeline import build_financials
 from src.sec.filings import FilingNotFoundError, find_10k_filing
 
@@ -93,7 +94,7 @@ def audit_anchor_year_and_sections() -> dict[str, tuple[CompanyFinancials, Filin
     print("\n=== SEAM A/C: documents and anchor years ===")
     built: dict[str, tuple[CompanyFinancials, FilingDocument]] = {}
     for ticker in TICKERS:
-        fin = build_financials(ticker)
+        fin = build_financials(ticker, as_of_fy=DEMO_PINS.get(ticker))
         doc = fetch_and_split_latest_10k(ticker, fin)
         built[ticker] = (fin, doc)
         anchor_year = fin.fiscal_years[-1]
@@ -227,7 +228,7 @@ def audit_validator_negative_cases() -> None:
 
 def audit_qoe_missing_addback() -> None:
     print("\n=== QoE missing add-back check ===")
-    fin = build_financials("MSFT")
+    fin = build_financials("MSFT", as_of_fy=DEMO_PINS.get("MSFT"))
     year = fin.fiscal_years[-1]
     bridge = build_qoe_bridge_from_figures("MSFT", fin.figures, year)
     missing = [m for m in bridge.missing_addbacks if m.category == "restructuring"]

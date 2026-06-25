@@ -35,3 +35,14 @@ ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 CACHE_DIR = Path("data/cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Anchor year pins for the five demo companies. build_financials accepts an
+# as_of_fy param; passing DEMO_PINS.get(ticker) locks the pipeline to the
+# year where goldens are hand-verified. Non-demo tickers get None → latest.
+DEMO_PINS: dict[str, int] = {
+    "MSFT": 2024,
+    "VZ":   2024,
+    "MCD":  2024,
+    "NVDA": 2024,
+    "CRM":  2024,
+}

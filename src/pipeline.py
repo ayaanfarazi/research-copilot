@@ -73,7 +73,8 @@ def _has_form(us_gaap: dict, forms: tuple[str, ...]) -> bool:
 
 
 def _available_fiscal_years(
-    us_gaap: dict, fye_month: int | None, n: int, label_map: dict
+    us_gaap: dict, fye_month: int | None, n: int, label_map: dict,
+    as_of_fy: int | None = None,
 ) -> list[int]:
     """
     Determine the last `n` fiscal years the filer actually reports.
@@ -81,6 +82,9 @@ def _available_fiscal_years(
     We union the annual periods found on a few near-universal reference concepts
     (revenue, then assets, then net income as fallbacks) so we don't depend on any
     single tag being present, then keep the most recent `n`.
+
+    as_of_fy: if set, caps the window so no year later than this is included.
+    Used to pin demo companies to their hand-verified anchor year.
     """
     found: set[int] = set()
     for concept in ("revenue", "assets", "net_income"):
@@ -92,10 +96,12 @@ def _available_fiscal_years(
                     dedup.annual_facts_by_year(facts, cdef.is_flow, fye_month, label_map).keys()
                 )
                 break  # first present tag for this concept is enough
+    if as_of_fy is not None:
+        found = {y for y in found if y <= as_of_fy}
     return sorted(found)[-n:]
 
 
-def build_financials(ticker: str, years: int = 5) -> CompanyFinancials:
+def build_financials(ticker: str, years: int = 5, as_of_fy: int | None = None) -> CompanyFinancials:
     """Run the full deterministic pipeline for `ticker` over the last `years` fiscal years."""
     cik = get_cik(ticker)
     facts = get_company_facts(cik)
@@ -114,7 +120,7 @@ def build_financials(ticker: str, years: int = 5) -> CompanyFinancials:
     # Per-filer fiscal-year labels from the filer's own `fy` designation (handles the
     # Walmart-vs-Target case where identical year-ends are labelled differently).
     label_map = dedup.build_fy_label_map(us_gaap)
-    fiscal_years = _available_fiscal_years(us_gaap, fye_month, years, label_map)
+    fiscal_years = _available_fiscal_years(us_gaap, fye_month, years, label_map, as_of_fy)
 
     # Graceful degradation (B1): no usable us-gaap annual periods. Return an explicit
     # status instead of crashing downstream on years[-1]. Two known root causes:
