@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from src.data import dedup, resolver, tag_map
 from src.data.models import CompanyFinancials, ComputedMetric, ConfidenceTier
+from src.documents.maturities import parse_maturity_schedule, reconcile_schedule
 from src.metrics import constructed, covenant, qoe, ratios, scorecard, survival
 from src.metrics._common import FigureStore, weakest_tier
 from src.sec.client import get_company_facts, get_submissions
@@ -101,7 +102,12 @@ def _available_fiscal_years(
     return sorted(found)[-n:]
 
 
-def build_financials(ticker: str, years: int = 5, as_of_fy: int | None = None) -> CompanyFinancials:
+def build_financials(
+    ticker: str,
+    years: int = 5,
+    as_of_fy: int | None = None,
+    footnote_text: str | None = None,
+) -> CompanyFinancials:
     """Run the full deterministic pipeline for `ticker` over the last `years` fiscal years."""
     cik = get_cik(ticker)
     facts = get_company_facts(cik)
@@ -198,6 +204,32 @@ def build_financials(ticker: str, years: int = 5, as_of_fy: int | None = None) -
     ratios.compute_revenue_cagr(store, fiscal_years)
     survival.compute_deleveraging_trajectory(store, fiscal_years)
     survival.compute_coverage_durability(store, fiscal_years)
+
+    # 3b) Maturity wall for the anchor year.
+    #
+    # If footnote_text is provided, attempt to parse and reconcile a schedule.
+    # When reconciled, also re-compute the anchor year's liquidity runway using
+    # the next-12-month bucket instead of the debt_current proxy — store.add()
+    # overwrites by figure_id, so the proxy result from step 2 is replaced.
+    # When not reconciled (or no footnote), the wall degrades to label='proxy'
+    # and liquidity_runway keeps the debt_current proxy from step 2 intact.
+    anchor_year = fiscal_years[-1]
+    _schedule = None
+    _reconcile = None
+    if footnote_text:
+        _schedule = parse_maturity_schedule(footnote_text)
+        td_fig = store.get("total_debt", anchor_year)
+        if _schedule is not None and td_fig is not None and td_fig.value is not None:
+            _reconcile = reconcile_schedule(_schedule, round(td_fig.value / 1_000_000))
+    survival.compute_maturity_wall(store, anchor_year, _schedule, _reconcile)
+
+    if _reconcile is not None and _reconcile.reconciled and _schedule is not None:
+        next_yr_key = str(anchor_year + 1)
+        near_term_m = _schedule.buckets.get(next_yr_key, 0)
+        # Re-compute to overwrite the proxy result; 0 is a valid override (nothing due).
+        survival.compute_liquidity_runway(
+            store, anchor_year, near_term_override=float(near_term_m) * 1_000_000
+        )
 
     # 4) Scorecard per year (needs net_leverage, coverage, trajectory, runway).
     for year in fiscal_years:

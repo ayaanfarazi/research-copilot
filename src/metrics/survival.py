@@ -16,8 +16,13 @@ with component_ids pointing at the underlying yearly figures so it stays auditab
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from src.data.models import ComputedMetric, ConfidenceTier
 from src.metrics._common import FigureStore, weakest_tier
+
+if TYPE_CHECKING:
+    from src.documents.maturities import MaturitySchedule, ReconcileResult
 
 # A net-leverage change smaller than this (in turns) is treated as "flat" -- avoids
 # calling noise a trend.
@@ -101,13 +106,19 @@ def compute_coverage_durability(store: FigureStore, years: list[int]) -> None:
     ))
 
 
-def compute_liquidity_runway(store: FigureStore, year: int) -> None:
+def compute_liquidity_runway(
+    store: FigureStore, year: int, near_term_override: float | None = None
+) -> None:
     """
     Liquidity vs near-term maturities for one year.
 
-    Near-term maturities are proxied by current debt (the XBRL stand-in for the
-    Phase-2 maturity wall). Ratio bands: >=3 comfortable, 1.5-3 adequate, 1-1.5 tight,
-    <1 acute. No current debt -> comfortable (nothing due near-term).
+    near_term_override: when provided (≥0), uses this USD amount instead of
+    XBRL debt_current.  Pass the next-12-month bucket from a reconciled maturity
+    schedule to upgrade from proxy to footnote-based near-term.  None keeps the
+    proxy path (XBRL debt_current) exactly as before.
+
+    Ratio bands: >=3 comfortable, 1.5-3 adequate, 1-1.5 tight, <1 acute.
+    No near-term maturities → comfortable (nothing due near-term).
     """
     liq = store.get("liquidity", year)
     cur_debt = store.get("debt_current", year)
@@ -121,14 +132,27 @@ def compute_liquidity_runway(store: FigureStore, year: int) -> None:
         ))
         return
 
-    near_term = cur_debt.value if (cur_debt is not None and cur_debt.value is not None) else 0.0
+    # Determine near-term maturities source: schedule bucket (preferred) or proxy.
+    if near_term_override is not None:
+        near_term = near_term_override
+        formula = "liquidity / schedule_next12m"
+        source_note = "near-term from reconciled maturity-schedule bucket"
+        debt_comp_ids: list[str] = []
+        confidence = weakest_tier(liq)
+    else:
+        near_term = cur_debt.value if (cur_debt is not None and cur_debt.value is not None) else 0.0
+        formula = "liquidity / current_debt (near-term proxy)"
+        source_note = "near-term via debt_current proxy (no reconciled schedule)"
+        debt_comp_ids = [cur_debt.figure_id] if cur_debt else []
+        confidence = weakest_tier(liq, cur_debt)
+
     if near_term <= 0:
         store.add(ComputedMetric(
             name="liquidity_runway", figure_id=store.id("liquidity_runway", year),
             value=None, label="comfortable", unit="x",
-            formula="liquidity / current_debt", component_ids=[liq.figure_id],
+            formula=formula, component_ids=[liq.figure_id],
             confidence=liq.confidence,
-            notes=["no current debt: no near-term maturities to cover"],
+            notes=["no near-term maturities to cover", source_note],
         ))
         return
 
@@ -144,7 +168,57 @@ def compute_liquidity_runway(store: FigureStore, year: int) -> None:
     store.add(ComputedMetric(
         name="liquidity_runway", figure_id=store.id("liquidity_runway", year),
         value=ratio, label=label, unit="x",
-        formula="liquidity / current_debt (near-term proxy)",
-        component_ids=[liq.figure_id] + ([cur_debt.figure_id] if cur_debt else []),
-        confidence=weakest_tier(liq, cur_debt),
+        formula=formula,
+        component_ids=[liq.figure_id] + debt_comp_ids,
+        confidence=confidence,
+        notes=[source_note],
+    ))
+
+
+def compute_maturity_wall(
+    store: FigureStore,
+    year: int,
+    schedule: "MaturitySchedule | None",
+    reconcile_result: "ReconcileResult | None",
+) -> None:
+    """
+    Persist the maturity-wall figure for the anchor year.
+
+    label='schedule': a reconciled footnote schedule was parsed; buckets and
+      reconcile note are stored in notes; value = total principal sum (USD).
+    label='proxy': no reconciled schedule; debt_current remains the near-term
+      stand-in in compute_liquidity_runway.  This is correct, not an error.
+
+    Does NOT alter compute_liquidity_runway — that function must be re-called
+    with near_term_override by the pipeline when a reconciled schedule exists.
+    """
+    figure_id = store.id("maturity_wall", year)
+
+    if schedule is None or reconcile_result is None or not reconcile_result.reconciled:
+        fail_note = (
+            reconcile_result.note
+            if reconcile_result is not None
+            else "no footnote text provided to build_financials"
+        )
+        store.add(ComputedMetric(
+            name="maturity_wall",
+            figure_id=figure_id,
+            value=None,
+            label="proxy",
+            formula="debt_current proxy (no reconciled aggregate schedule)",
+            confidence=ConfidenceTier.LOW,
+            notes=["no reconciled schedule; using current-debt proxy", fail_note],
+        ))
+        return
+
+    bucket_notes = [f"{k}: ${v:,}M" for k, v in schedule.buckets.items()]
+    store.add(ComputedMetric(
+        name="maturity_wall",
+        figure_id=figure_id,
+        value=float(reconcile_result.sum_principal) * 1_000_000,
+        label="schedule",
+        unit="USD",
+        formula="sum of maturities-schedule principal buckets (footnote-parsed)",
+        confidence=ConfidenceTier.HIGH,
+        notes=[reconcile_result.note] + bucket_notes,
     ))
