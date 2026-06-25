@@ -17,6 +17,7 @@ from src.documents.models import FilingDocument
 from src.documents.split import split_10k
 from src.llm.allowlist import build_enumerated_allowlist
 from src.llm.normalize import normalize_numeric_token
+from src.llm.schemas.citations import Citation
 from src.llm.validator import validate_output, validate_text
 from src.metrics.qoe import build_qoe_bridge_from_figures
 from src.pipeline import build_financials
@@ -24,12 +25,6 @@ from src.sec.filings import FilingNotFoundError, find_10k_filing
 
 TICKERS = ["MSFT", "VZ", "MCD", "NVDA", "CRM"]
 SECTION_KEYS = {"item_1", "item_1a", "item_7", "debt_footnote"}
-
-
-class Citation(BaseModel):
-    kind: str
-    ref: str
-    excerpt: str | None = None
 
 
 class SamplePanel(BaseModel):

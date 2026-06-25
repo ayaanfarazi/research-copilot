@@ -15,13 +15,8 @@ from src.llm.allowlist import build_enumerated_allowlist
 from src.llm.normalize import normalize_numeric_token
 from src.llm import allowlist as allowlist_mod
 from src.llm import tokenize as tokenize_mod
+from src.llm.schemas.citations import Citation
 from src.llm.validator import validate_output, validate_text
-
-
-class Citation(BaseModel):
-    kind: str
-    ref: str
-    excerpt: str | None = None
 
 
 class SamplePanel(BaseModel):
