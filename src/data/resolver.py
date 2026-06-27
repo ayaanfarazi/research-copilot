@@ -26,6 +26,156 @@ from src.data import dedup, tag_map
 from src.data.models import ConfidenceTier, ResolvedFact, make_figure_id
 
 
+# ---------------------------------------------------------------------------
+# dep_amort reconcile (B6b)
+# ---------------------------------------------------------------------------
+# Two candidates may resolve for the same period with materially different values:
+#
+#   DepreciationDepletionAndAmortization (DDA) — rank-0; for most filers this IS
+#   the cash-flow aggregate.  For others (e.g. CRM FY2024) it is tagged as a
+#   PP&E-only sub-component (1,100M) while the cash-flow aggregate sits in
+#   DepreciationAndAmortization (DA = 3,959M).
+#
+#   DepreciationAndAmortization (DA) — rank-2; promoted only after passing all
+#   three stages below.  The element name alone is not sufficient evidence.
+#
+# Stage 2 — bundle guard: tests DA ≈ DDA + CapContractAmort (within 5%).
+#   TRUE  → DA IS the trivial PP&E-component + ASC-606-contract-cost sum.
+#            Per decision B6b, capitalized-contract-cost amortization is
+#            deliberately excluded from the EBITDA D&A add-back (it is a cash
+#            working-capital timing item, not a true non-cash depreciation
+#            charge); DA is therefore over-inclusive for EBITDA → fall back to
+#            DDA, LOW confidence.
+#   FALSE → DA ≠ trivial DDA+Cap sum.  Necessary condition that DA is the
+#            broader aggregate.  Does NOT prove CapContractAmort is unbundled
+#            from DA — only that DA contains more than those two items.
+#
+# Stage 3 — cash-flow tie: verify XBRL-tagged sub-components of DA
+#   (_DA_CF_POOL_TAGS, which excludes CapContractAmort — a separate OCF line;
+#   do NOT subtract it from DA) are a consistent subset.
+#   Coverage is computed from the CF pool ONLY (independent corroboration);
+#   DDA is not counted toward coverage because it is the mislabeled element
+#   under test — counting it as its own corroboration would be circular.
+#   The CF pool cannot observe acquired-intangible amortization for filers
+#   (like CRM post-FY2017) that don't tag AmortizationOfIntangibleAssets;
+#   such filers land at LOW confidence — by design.
+#
+# CRM FY2024 trace:
+#   DDA=1,100M  DA=3,959M  CapContractAmort=1,925M  FinLease=264M
+#   Stage 1: div=72.2% > 15% → proceeds.
+#   Stage 2: DDA+Cap=3,025M vs DA=3,959M → bundle_div=23.6% > 5% → FALSE.
+#            (DA ≠ trivial sum — necessary, not sufficient, evidence of aggregation.)
+#   Stage 3: cf_pool_sum=264M (FinLease only; AmortIntangibles untagged post-FY2017).
+#            coverage = cf_pool_sum/DA = 264M/3,959M = 6.7% < 20% → tie FAILS.
+#            DA promoted at LOW.  CapContractAmort(1,925M) is a separate OCF
+#            line — do NOT subtract it from DA.
+_DA_RECONCILE_THRESHOLD = 0.15   # rel. divergence above which promotion analysis runs
+_DA_BUNDLE_GUARD_TOL   = 0.05   # DA ≈ DDA+Cap within 5% → DA bundles the contract line
+_DA_CF_MIN_COVERAGE    = 0.20   # independent CF sub-components must cover ≥ 20% of DA
+_DA_AGGREGATE_TAG    = "DepreciationAndAmortization"
+_DA_COMPONENT_TAG    = "DepreciationDepletionAndAmortization"
+_DA_CAP_CONTRACT_TAG = "CapitalizedContractCostAmortization"
+# Sub-components summed for the CF tie (CapContractAmort excluded —
+# separate OCF line, not a sub-component of the DA aggregate).
+_DA_CF_POOL_TAGS = [
+    "FinanceLeaseRightOfUseAssetAmortization",
+    "AmortizationOfIntangibleAssets",
+    "OtherDepreciationAndAmortization",
+    "Depreciation",
+]
+
+
+def _da_reconcile_anchor(
+    per_tag: dict,
+    latest_year: int,
+    cap_contract_val: float | None,
+    cf_pool_sum: float,      # sum of _DA_CF_POOL_TAGS for anchor year (no CapContractAmort)
+) -> tuple[str | None, bool, list[str]]:
+    """
+    When both DDA and DA resolve for the anchor year, choose the cash-flow aggregate.
+
+    Returns (override_anchor, force_low, notes):
+      None, False  ->  keep rank-0 DDA (no promotion warranted).
+      DA,   False  ->  promote DA, HIGH confidence (all three stages pass).
+      None, True   ->  retain DDA, LOW confidence (bundle guard tripped).
+      DA,   True   ->  promote DA, LOW confidence (CF tie failed).
+    """
+    dda_entry = per_tag.get(_DA_COMPONENT_TAG)
+    da_entry  = per_tag.get(_DA_AGGREGATE_TAG)
+    if dda_entry is None or da_entry is None:
+        return None, False, []
+
+    dda_pick = dda_entry[0].get(latest_year)
+    da_pick  = da_entry[0].get(latest_year)
+    if dda_pick is None or da_pick is None:
+        return None, False, []
+
+    dda_v = dda_pick.fact.get("val")
+    da_v  = da_pick.fact.get("val")
+    if dda_v is None or da_v is None or dda_v == da_v:
+        return None, False, []
+
+    # Stage 1: divergence guard.
+    rel_div = abs(da_v - dda_v) / max(abs(da_v), abs(dda_v), 1.0)
+    if rel_div <= _DA_RECONCILE_THRESHOLD:
+        return None, False, [
+            f"dep_amort reconcile FY{latest_year}: DDA={dda_v:,.0f} ≈ DA={da_v:,.0f} "
+            f"(div={rel_div:.1%} ≤ {_DA_RECONCILE_THRESHOLD:.0%}); DDA retained "
+            f"(scope: component≈aggregate)"
+        ]
+
+    # Stage 2: bundle guard — tests whether DA ≈ DDA + CapContractAmort.
+    # TRUE means DA IS the trivial PP&E-component + contract-cost sum.  Per
+    # decision B6b, ASC-606 capitalized-contract-cost amortization is deliberately
+    # excluded from the EBITDA D&A add-back; retaining DDA enforces that exclusion
+    # when DA bundles the separately-tagged contract-cost line.
+    if cap_contract_val is not None and cap_contract_val > 0:
+        bundled = dda_v + cap_contract_val
+        bundle_div = abs(da_v - bundled) / max(abs(da_v), abs(bundled), 1.0)
+        if bundle_div <= _DA_BUNDLE_GUARD_TOL:
+            return None, True, [
+                f"dep_amort reconcile FY{latest_year}: DA={da_v:,.0f} ≈ "
+                f"DDA+CapContractAmort={bundled:,.0f} (div={bundle_div:.1%} ≤ 5%); "
+                f"DA is the trivial PP&E-component + ASC-606-contract-cost sum — "
+                f"DDA={dda_v:,.0f} retained (scope: component); confidence LOW. "
+                f"Decision B6b: capitalized-contract-cost amortization deliberately "
+                f"excluded from EBITDA D&A; retaining DDA enforces that exclusion."
+            ]
+
+    # Stage 3: cash-flow tie.
+    # known_sum = DDA + cf_pool_sum: used ONLY for the overflow check (a).
+    # coverage  = cf_pool_sum / DA:  independent corroboration only.  DDA is
+    #   excluded from coverage because it is the mislabeled element under test;
+    #   counting it toward its own corroboration would be circular.
+    # The CF pool cannot observe acquired-intangible amortization for filers
+    # (like CRM post-FY2017) that don't tag AmortizationOfIntangibleAssets;
+    # such filers land at LOW confidence — by design.
+    known_sum = dda_v + cf_pool_sum
+    coverage  = cf_pool_sum / da_v if da_v > 0 else 0.0
+    if known_sum > da_v * 1.001:   # rounding epsilon only; a subset exceeding its
+        return _DA_AGGREGATE_TAG, True, [  # aggregate is a contradiction, not noise
+            f"dep_amort reconcile FY{latest_year}: CF tie FAILED — "
+            f"tagged sub-components known_sum={known_sum:,.0f} > DA={da_v:,.0f}; "
+            f"DA under-counts its own tagged components; DA promoted at LOW confidence"
+        ]
+    if coverage < _DA_CF_MIN_COVERAGE:
+        return _DA_AGGREGATE_TAG, True, [
+            f"dep_amort reconcile FY{latest_year}: CF tie FAILED — "
+            f"independent CF pool covers only {coverage:.1%} of DA={da_v:,.0f} "
+            f"(cf_pool_sum={cf_pool_sum:,.0f}; threshold {_DA_CF_MIN_COVERAGE:.0%}); "
+            f"AmortizationOfIntangibleAssets not tagged for this filer/year — "
+            f"element name alone insufficient; DA promoted at LOW confidence"
+        ]
+
+    return _DA_AGGREGATE_TAG, False, [
+        f"dep_amort reconcile FY{latest_year}: DA={da_v:,.0f} > DDA={dda_v:,.0f} "
+        f"(div={rel_div:.1%} > {_DA_RECONCILE_THRESHOLD:.0%}); "
+        f"bundle guard passed (DA ≠ trivial DDA+Cap sum); "
+        f"CF tie OK — independent coverage={coverage:.1%} (cf_pool_sum={cf_pool_sum:,.0f} / DA); "
+        f"≥ {_DA_CF_MIN_COVERAGE:.0%}; DA returned (scope: aggregate)"
+    ]
+
+
 def _facts_for_tag(us_gaap: dict, tag: str, unit_pref: str) -> tuple[list[dict], str | None]:
     """
     Return (facts, unit) for a tag, locked to the concept's expected unit bucket.
@@ -112,15 +262,47 @@ def resolve_series(
         reason = _unit_mismatch_reason(us_gaap, concept_def)
         return {y: _not_found(concept, y, reason) for y in years}
 
+    # dep_amort reconcile: when both DDA and DA are present, may promote DA
+    # as the cash-flow aggregate after the three-stage guard.
+    _rcn_override: str | None = None
+    _rcn_force_low: bool = False
+    _rcn_notes: list[str] = []
+    if concept == "dep_amort":
+        _rcn_latest = max(years)
+        # CapContractAmort: for the bundle guard only.  NOT added to the CF pool
+        # (separate OCF line; do NOT subtract it from DA).
+        _cap_facts, _ = _facts_for_tag(us_gaap, _DA_CAP_CONTRACT_TAG, unit_pref)
+        _cap_by_yr = (
+            dedup.annual_facts_by_year(_cap_facts, True, fye_month, label_map)
+            if _cap_facts else {}
+        )
+        _cap_pick = _cap_by_yr.get(_rcn_latest)
+        _cap_v = _cap_pick.fact.get("val") if _cap_pick else None
+        # CF pool: tagged sub-components of the DA aggregate (excluding CapContractAmort).
+        _cf_pool_sum = 0.0
+        for _pool_tag in _DA_CF_POOL_TAGS:
+            _pf, _ = _facts_for_tag(us_gaap, _pool_tag, unit_pref)
+            if _pf:
+                _pby = dedup.annual_facts_by_year(_pf, True, fye_month, label_map)
+                _pp = _pby.get(_rcn_latest)
+                if _pp is not None and _pp.fact.get("val") is not None:
+                    _cf_pool_sum += float(_pp.fact["val"])
+        _rcn_override, _rcn_force_low, _rcn_notes = _da_reconcile_anchor(
+            per_tag, _rcn_latest, _cap_v, _cf_pool_sum
+        )
+
     # Step 2: choose the anchor tag from the LATEST requested year, walking candidates
     # in priority order so the most-preferred tag that actually has the latest year wins.
     latest_year = max(years)
     anchor_tag: str | None = None
-    for cand in concept_def.candidates:
-        entry = per_tag.get(cand.tag)
-        if entry and latest_year in entry[0]:
-            anchor_tag = cand.tag
-            break
+    if _rcn_override is not None and _rcn_override in per_tag:
+        anchor_tag = _rcn_override
+    else:
+        for cand in concept_def.candidates:
+            entry = per_tag.get(cand.tag)
+            if entry and latest_year in entry[0]:
+                anchor_tag = cand.tag
+                break
 
     # Step 3: resolve each year, preferring the anchor tag, flagging fallbacks.
     out: dict[int, ResolvedFact] = {}
@@ -156,6 +338,10 @@ def resolve_series(
         value = f.get("val")
         notes += _sign_note(concept, value)
 
+        conf = tag_map.tier_for_rank(rank)
+        if _rcn_force_low and conf == ConfidenceTier.HIGH:
+            conf = ConfidenceTier.LOW
+
         out[year] = ResolvedFact(
             concept=concept,
             figure_id=make_figure_id(concept, year),
@@ -168,8 +354,8 @@ def resolve_series(
             form=f.get("form"),
             accession=f.get("accn"),
             filed=dedup._parse(f.get("filed")),
-            confidence=tag_map.tier_for_rank(rank),
-            notes=notes,
+            confidence=conf,
+            notes=notes + _rcn_notes,
         )
 
     return out
