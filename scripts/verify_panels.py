@@ -22,6 +22,7 @@ from src.llm.panels.business import generate_business_summary
 from src.llm.panels.qoe_candidates import generate_qoe_candidates
 from src.llm.panels.revenue_drivers import generate_revenue_drivers
 from src.llm.panels.risks import generate_risks
+from src.llm.panels.synthesis import generate_anchored_synthesis
 from src.llm.schemas.citations import Citation, Claim
 from src.llm.schemas.descriptive import (
     BusinessSummaryPanel,
@@ -29,6 +30,7 @@ from src.llm.schemas.descriptive import (
     RevenueDriversPanel,
     RisksPanel,
 )
+from src.llm.schemas.synthesis import AnchoredSynthesisPanel
 from src.llm.validator import validate_output
 from src.metrics.qoe import build_qoe_bridge_from_figures
 
@@ -310,21 +312,33 @@ def section_a() -> bool:
 # Section B: real API gate
 # ---------------------------------------------------------------------------
 
-def section_b(tickers: list[str] | None = None) -> bool:
+def section_b(tickers: list[str] | None = None, panel_filter: str | None = None) -> bool:
+    from config import DEMO_PINS
     from src.documents.fetch import fetch_and_split_latest_10k
     from src.pipeline import build_financials
 
     run_tickers = tickers if tickers else TICKERS
     print("\n" + "=" * 70)
-    print(f"SECTION B: Real API gate ({', '.join(run_tickers)})")
+    label = f"panel={panel_filter}" if panel_filter else "all panels"
+    print(f"SECTION B: Real API gate ({', '.join(run_tickers)}, {label})")
     print("=" * 70)
 
     results: list[tuple[str, str, str, bool]] = []  # (ticker, panel, status, no_crash)
 
+    _DEFAULT_PANELS = [
+        ("business_summary", generate_business_summary),
+        ("risks", generate_risks),
+        ("revenue_drivers", generate_revenue_drivers),
+        ("qoe_candidates", generate_qoe_candidates),
+    ]
+    _SYNTHESIS_PANELS = [
+        ("synthesis", generate_anchored_synthesis),
+    ]
+
     for ticker in run_tickers:
         print(f"\n--- {ticker} ---")
         try:
-            fin = build_financials(ticker)
+            fin = build_financials(ticker, as_of_fy=DEMO_PINS.get(ticker))
             doc = fetch_and_split_latest_10k(ticker, fin)
             year = fin.fiscal_years[-1]
             # Register QoE bridge figures into fin.figures before building allowlist
@@ -332,16 +346,19 @@ def section_b(tickers: list[str] | None = None) -> bool:
         except Exception:
             print(f"  [FAIL] {ticker}: financials/document fetch failed")
             traceback.print_exc()
-            for pname in ("business_summary", "risks", "revenue_drivers", "qoe_candidates"):
+            panel_names = (
+                ["synthesis"] if panel_filter == "synthesis"
+                else [p for p, _ in _DEFAULT_PANELS]
+            )
+            for pname in panel_names:
                 results.append((ticker, pname, "fetch_error", False))
             continue
 
-        for pname, gen_fn in [
-            ("business_summary", generate_business_summary),
-            ("risks", generate_risks),
-            ("revenue_drivers", generate_revenue_drivers),
-            ("qoe_candidates", generate_qoe_candidates),
-        ]:
+        panels_to_run = (
+            _SYNTHESIS_PANELS if panel_filter == "synthesis" else _DEFAULT_PANELS
+        )
+
+        for pname, gen_fn in panels_to_run:
             try:
                 panel, vr = gen_fn(fin, doc, year)
             except Exception:
@@ -356,20 +373,28 @@ def section_b(tickers: list[str] | None = None) -> bool:
                 results.append((ticker, pname, "no_status", False))
                 continue
 
-            if panel.status not in ("ok", "validation_failed"):
-                print(f"  [FAIL] {pname}: status={panel.status!r} (expected 'ok' or 'validation_failed')")
+            _valid_statuses = {"ok", "validation_failed", "confidence_gap"}
+            if panel.status not in _valid_statuses:
+                print(f"  [FAIL] {pname}: status={panel.status!r} (unexpected)")
                 results.append((ticker, pname, panel.status, False))
                 continue
 
             # Internal consistency: vr.passed ↔ status
-            if vr.passed and panel.status == "validation_failed":
-                print(f"  [FAIL] {pname}: vr.passed=True but status='validation_failed' (inconsistency)")
+            if vr.passed and panel.status in ("validation_failed", "confidence_gap"):
+                print(f"  [FAIL] {pname}: vr.passed=True but status={panel.status!r} (inconsistency)")
                 results.append((ticker, pname, "inconsistent", False))
+                continue
+
+            # Synthesis: print full JSON + ValidationResult, then continue
+            if pname == "synthesis":
+                _print_synthesis(ticker, year, panel, vr)
+                results.append((ticker, pname, panel.status, True))
                 continue
 
             n_violations = len(vr.violations)
             n_claims = _count_claims(panel)
-            print(f"  [{'PASS' if panel.status == 'ok' else 'WARN'}] {pname}: "
+            mark = "PASS" if panel.status == "ok" else ("WARN" if panel.status == "validation_failed" else "GAP")
+            print(f"  [{mark}] {pname}: "
                   f"status={panel.status} violations={n_violations} claims={n_claims}")
             if vr.violations:
                 for v in vr.violations:
@@ -402,6 +427,20 @@ def section_b(tickers: list[str] | None = None) -> bool:
     return len(crashed) == 0
 
 
+def _print_synthesis(ticker: str, year: int, panel: AnchoredSynthesisPanel, vr: ValidationResult) -> None:
+    print(f"\n{'=' * 70}")
+    print(f"AnchoredSynthesisPanel JSON  ({ticker} FY{year})")
+    print("=" * 70)
+    print(panel.model_dump_json(indent=2))
+    print(f"\nValidationResult:")
+    print(f"  passed    : {vr.passed}")
+    print(f"  violations: {len(vr.violations)}")
+    for v in vr.violations:
+        print(f"    field={v.field_path!r}  token={v.raw_token!r}  reason={v.reason!r}")
+    mark = "PASS" if panel.status == "ok" else ("WARN" if panel.status == "validation_failed" else "GAP")
+    print(f"\n  [{mark}] synthesis: status={panel.status}")
+
+
 def _count_claims(panel: object) -> int:
     count = 0
     field_names = type(panel).model_fields if hasattr(type(panel), "model_fields") else {}
@@ -419,11 +458,25 @@ def _count_claims(panel: object) -> int:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    # Optional positional args: ticker symbols to run in Section B.
-    # python scripts/verify_panels.py          → all 5 tickers
-    # python scripts/verify_panels.py MSFT     → MSFT only
-    # python scripts/verify_panels.py MSFT VZ  → those two only
-    requested = [t.upper() for t in sys.argv[1:]]
+    # Usage:
+    #   python scripts/verify_panels.py                       → all tickers, all panels
+    #   python scripts/verify_panels.py MSFT                  → MSFT only, all panels
+    #   python scripts/verify_panels.py MSFT --panel synthesis → MSFT, synthesis only
+    args = list(sys.argv[1:])
+    panel_filter: str | None = None
+    if "--panel" in args:
+        idx = args.index("--panel")
+        if idx + 1 >= len(args):
+            print("ERROR: --panel requires a panel name (e.g. --panel synthesis)")
+            return 1
+        panel_filter = args[idx + 1].lower()
+        args = args[:idx] + args[idx + 2:]
+    _KNOWN_PANELS = {"synthesis", "business_summary", "risks", "revenue_drivers", "qoe_candidates"}
+    if panel_filter and panel_filter not in _KNOWN_PANELS:
+        print(f"ERROR: unknown panel {panel_filter!r}. Known: {sorted(_KNOWN_PANELS)}")
+        return 1
+
+    requested = [t.upper() for t in args]
     unknown = [t for t in requested if t not in TICKERS]
     if unknown:
         print(f"ERROR: unknown ticker(s): {unknown}. Valid: {TICKERS}")
@@ -434,7 +487,7 @@ def main() -> int:
         print("\nSection A failed — aborting before Section B (real API calls).")
         return 1
 
-    b_ok = section_b(requested or None)
+    b_ok = section_b(requested or None, panel_filter=panel_filter)
 
     print("\n" + "=" * 70)
     if a_ok and b_ok:

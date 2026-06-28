@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from src.data.models import CompanyFinancials, ComputedMetric, ResolvedFact
+from src.data.models import CompanyFinancials, ComputedMetric, ConfidenceTier, ResolvedFact
 from src.llm.schemas.citations import Claim
 
 
@@ -37,6 +37,9 @@ def build_figure_catalog(financials: CompanyFinancials) -> str:
     Build a figure catalog string for LLM prompts listing figure_ids without values.
 
     The LLM cites figures by figure_id; values are never exposed here (numeric injection).
+    For flagged figures (LOW/NOT_FOUND confidence or not_meaningful/anomaly/net_cash status)
+    the figure's notes are appended so the model understands the source of uncertainty
+    and can name it in confidence_caveats.  Values still never appear; only the note text.
     """
     lines = ["Available figures (cite by figure_id; do not write values):"]
     for fig in financials.figures.values():
@@ -55,5 +58,17 @@ def build_figure_catalog(financials: CompanyFinancials) -> str:
             label = fig.concept.replace("_", " ")
         else:
             label = name_part.replace("_", " ")
-        lines.append(f"  {fid:<40} | {label:<35} | {unit:<5} | {period}")
+
+        is_flagged = (
+            fig.confidence in (ConfidenceTier.LOW, ConfidenceTier.NOT_FOUND)
+            or (
+                isinstance(fig, ComputedMetric)
+                and getattr(fig, "status", "ok") in ("not_meaningful", "anomaly", "net_cash")
+            )
+        )
+        line = f"  {fid:<40} | {label:<35} | {unit:<5} | {period}"
+        if is_flagged and fig.notes:
+            notes_text = "; ".join(fig.notes)
+            line += f" | [flagged] {notes_text}"
+        lines.append(line)
     return "\n".join(lines)

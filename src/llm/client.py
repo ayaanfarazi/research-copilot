@@ -170,7 +170,10 @@ def _format_violations(vr: ValidationResult) -> str:
         "Directional words (grew, declined, expanded) are allowed; magnitudes and specific years are not. "
         "To express a magnitude, cite a figure_id. "
         "To express a date, use a verbatim section excerpt that contains it. "
-        "Verbatim excerpts must be character-for-character copies from the source text.",
+        "Verbatim excerpts must be character-for-character copies from the source text. "
+        "Cite only figure_ids present in the catalog for this run — "
+        "figure_id_not_in_allowlist means the cited figure_id does not exist "
+        "for this company+year; check the catalog and use only listed figure_ids.",
     ]
     return "\n".join(lines)
 

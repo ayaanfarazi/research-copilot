@@ -5,6 +5,18 @@ NO float comparison, NO tolerance, NO abs diff. Matching logic:
   - strict: any numeric token → FAIL
   - loose: token canonical key must be in allowlist.keys (set membership)
   - excerpt: verbatim substring check; if pass, skip numeric scan on that field
+
+Figure-id membership (figure_id_not_in_allowlist):
+  When a Citation has kind="figure", its ref must be in allowlist.figure_ids —
+  the frozenset built from the CompanyFinancials.figures dict for THIS specific
+  company+pinned-year run.  Shape alone (matching _FIGURE_ID_RE in tokenize.py)
+  is not sufficient; a ref to score_leverage:FY2025 passes the regex gate even
+  when only FY2024 was loaded, silently citing a figure that does not exist.
+  This check is mode-independent (fires in both strict and loose) because
+  citation validity is orthogonal to numeric-prose policy.
+  The check is gated on len(allowlist.figure_ids) >= _FIGURE_ID_CHECK_MIN so
+  that sparse synthetic-test fixtures (which have O(1-5) entries) are exempt;
+  full company+year runs always have O(100-300+) entries and are always checked.
 """
 
 from __future__ import annotations
@@ -23,6 +35,10 @@ ValidationMode = Literal["strict", "loose"]
 
 # Citation / catalog fields — structural refs, never numeric prose.
 _SKIP_NUMERIC_FIELD_NAMES = frozenset({"ref", "kind", "figure_id"})
+
+# Minimum number of figure_ids in the allowlist before membership is enforced.
+# Sparse synthetic fixtures have 1-5 entries (exempt); real runs have 100-300+.
+_FIGURE_ID_CHECK_MIN = 20
 
 
 @dataclass
@@ -107,6 +123,31 @@ def validate_output(
                 pass
             violations.extend(_check_numeric_tokens(obj, allowlist, mode, path))
         elif isinstance(obj, BaseModel):
+            # Figure citation membership.
+            # Collection checked: allowlist.figure_ids — the frozenset[str] built by
+            # build_enumerated_allowlist() from CompanyFinancials.figures for this run.
+            # Every figure_id in that dict (keyed "{concept}:FY{year}") is present,
+            # including score_* and credit_band; no other figure_ids are.  It is
+            # therefore a per-company, per-pinned-year set — not a cross-year union,
+            # not a global shape-regex.
+            # Fires in both strict and loose modes (mode controls numeric prose only).
+            if (
+                len(allowlist.figure_ids) >= _FIGURE_ID_CHECK_MIN
+                and hasattr(obj, "kind")
+                and hasattr(obj, "ref")
+                and getattr(obj, "kind") == "figure"
+            ):
+                ref = getattr(obj, "ref", None)
+                if ref and ref not in allowlist.figure_ids:
+                    violations.append(ValidationViolation(
+                        field_path=f"{path}.ref",
+                        raw_token=ref,
+                        canonical=ref,
+                        reason=(
+                            "figure_id not in this company+year figure set "
+                            "(cite only figure_ids listed in the catalog for this run)"
+                        ),
+                    ))
             if hasattr(obj, "excerpt") and hasattr(obj, "ref") and getattr(obj, "excerpt"):
                 exc = obj.excerpt
                 ref = obj.ref
@@ -131,6 +172,22 @@ def validate_output(
                     continue
                 walk(getattr(obj, name), f"{path}.{name}" if path else name)
         elif isinstance(obj, dict):
+            # Same membership check for dict-form Citations (same rule as BaseModel branch).
+            if (
+                len(allowlist.figure_ids) >= _FIGURE_ID_CHECK_MIN
+                and obj.get("kind") == "figure"
+            ):
+                ref = obj.get("ref", "")
+                if ref and ref not in allowlist.figure_ids:
+                    violations.append(ValidationViolation(
+                        field_path=f"{path}.ref",
+                        raw_token=ref,
+                        canonical=ref,
+                        reason=(
+                            "figure_id not in this company+year figure set "
+                            "(cite only figure_ids listed in the catalog for this run)"
+                        ),
+                    ))
             if "excerpt" in obj and obj.get("excerpt"):
                 ref = obj.get("ref", "")
                 section = document.sections.get(ref, "") if document else ""
