@@ -180,6 +180,17 @@ CONCEPTS: dict[str, Concept] = {
         is_flow=True,
         expected_sign="positive",
     ),
+    # Contract-cost amortization (ASC 340-40): amortization of capitalized costs to
+    # obtain a contract (deferred commissions). Resolved into the spine so it is
+    # citeable, but DELIBERATELY EXCLUDED from adjusted EBITDA (see qoe._EXCLUDED_ADDBACKS)
+    # — recurring cost of acquiring revenue, not a clean non-cash/one-time add-back.
+    # Material for SaaS filers (e.g. CRM); resolves not_found and degrades elsewhere.
+    "contract_cost_amort": Concept(
+        "contract_cost_amort",
+        _c("CapitalizedContractCostAmortization"),
+        is_flow=True,
+        expected_sign="positive",
+    ),
     # --- Cash flow (flows) ---
     "operating_cash_flow": Concept(
         "operating_cash_flow",

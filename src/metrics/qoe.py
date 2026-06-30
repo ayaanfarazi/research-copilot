@@ -23,6 +23,15 @@ _ADD_BACKS: tuple[tuple[AddBackCategory, str], ...] = (
     ("impairment", "Impairments"),
 )
 
+_EXCLUDED_ADDBACKS: tuple[tuple[str, str, str], ...] = (
+    (
+        "contract_cost_amort",
+        "Contract cost amortization",
+        "recurring cost to obtain contracts (ASC 340-40); excluded from adjusted EBITDA",
+    ),
+)
+_EXCLUDED_NOTE_PREFIX = "resolved, excluded from adjusted EBITDA"
+
 
 class QoEAddBackLine(BaseModel):
     """One found XBRL-tagged add-back line included in adjusted EBITDA."""
@@ -38,6 +47,17 @@ class QoEAddBackLine(BaseModel):
     period_end: date | None = None
     accession: str | None = None
     notes: list[str] = Field(default_factory=list)
+
+
+class QoEExcludedAddBack(BaseModel):
+    """A resolved figure deliberately NOT added to adjusted EBITDA (e.g. contract-cost amort)."""
+
+    category: str
+    label: str
+    figure_id: str
+    confidence: ConfidenceTier
+    fiscal_year: int
+    reason: str
 
 
 class QoEMissingAddBack(BaseModel):
@@ -60,6 +80,7 @@ class QoEBridge(BaseModel):
     net_debt_figure_id: str | None
     addbacks: list[QoEAddBackLine]
     missing_addbacks: list[QoEMissingAddBack]
+    excluded_addbacks: list[QoEExcludedAddBack] = Field(default_factory=list)
     adjusted_ebitda: ComputedMetric
     adjusted_net_leverage: ComputedMetric
     notes: list[str] = Field(default_factory=list)
@@ -127,6 +148,7 @@ def compute_qoe_bridge(store: FigureStore, ticker: str, year: int) -> QoEBridge:
     adjusted_net_leverage = _register_adjusted_net_leverage(
         store, year, net_debt, adjusted_ebitda
     )
+    excluded = _mark_excluded_addbacks(store, year)
 
     return QoEBridge(
         ticker=ticker.upper(),
@@ -135,6 +157,7 @@ def compute_qoe_bridge(store: FigureStore, ticker: str, year: int) -> QoEBridge:
         net_debt_figure_id=net_debt.figure_id if net_debt is not None else None,
         addbacks=addbacks,
         missing_addbacks=missing,
+        excluded_addbacks=excluded,
         adjusted_ebitda=adjusted_ebitda,
         adjusted_net_leverage=adjusted_net_leverage,
         notes=bridge_notes,
@@ -148,6 +171,27 @@ def build_qoe_bridge_from_figures(ticker: str, figures: dict[str, Figure], year:
     bridge = compute_qoe_bridge(store, ticker, year)
     figures.update(store.figures)
     return bridge
+
+
+def _mark_excluded_addbacks(store: FigureStore, year: int) -> list[QoEExcludedAddBack]:
+    """Stamp resolved-but-excluded candidate add-backs with a provenance note (idempotent).
+
+    Present in the spine (citeable) but intentionally NOT part of adjusted EBITDA.
+    Value and confidence are never mutated — only a one-time note is appended.
+    """
+    out: list[QoEExcludedAddBack] = []
+    for category, label, reason in _EXCLUDED_ADDBACKS:
+        fig = store.get(category, year)
+        if fig is None or fig.value is None:
+            continue
+        note = f"{_EXCLUDED_NOTE_PREFIX}: {reason}"
+        if note not in fig.notes:        # idempotent across pipeline + harness rebuilds
+            fig.notes.append(note)
+        out.append(QoEExcludedAddBack(
+            category=category, label=label, figure_id=fig.figure_id,
+            confidence=fig.confidence, fiscal_year=year, reason=reason,
+        ))
+    return out
 
 
 def _register_adjusted_ebitda(
