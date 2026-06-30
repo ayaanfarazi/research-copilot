@@ -22,6 +22,7 @@ from src.llm.panels.business import generate_business_summary
 from src.llm.panels.qoe_candidates import generate_qoe_candidates
 from src.llm.panels.revenue_drivers import generate_revenue_drivers
 from src.llm.panels.risks import generate_risks
+from src.llm.panels.addback_adversary import generate_addback_adversary
 from src.llm.panels.synthesis import generate_anchored_synthesis
 from src.llm.schemas.citations import Citation, Claim
 from src.llm.schemas.descriptive import (
@@ -30,6 +31,7 @@ from src.llm.schemas.descriptive import (
     RevenueDriversPanel,
     RisksPanel,
 )
+from src.llm.schemas.addback_adversary import AddBackAdversaryPanel
 from src.llm.schemas.synthesis import AnchoredSynthesisPanel
 from src.llm.validator import validate_output
 from src.metrics.qoe import build_qoe_bridge_from_figures
@@ -334,6 +336,15 @@ def section_b(tickers: list[str] | None = None, panel_filter: str | None = None)
     _SYNTHESIS_PANELS = [
         ("synthesis", generate_anchored_synthesis),
     ]
+    _ADDBACK_PANELS = [
+        ("addback_adversary", generate_addback_adversary),
+    ]
+    # Headline reasoning panels run one-at-a-time via --panel, with full-JSON
+    # printing (mirrors the synthesis path).
+    _SINGLE_PANEL_SETS = {
+        "synthesis": _SYNTHESIS_PANELS,
+        "addback_adversary": _ADDBACK_PANELS,
+    }
 
     for ticker in run_tickers:
         print(f"\n--- {ticker} ---")
@@ -347,16 +358,14 @@ def section_b(tickers: list[str] | None = None, panel_filter: str | None = None)
             print(f"  [FAIL] {ticker}: financials/document fetch failed")
             traceback.print_exc()
             panel_names = (
-                ["synthesis"] if panel_filter == "synthesis"
+                [panel_filter] if panel_filter in _SINGLE_PANEL_SETS
                 else [p for p, _ in _DEFAULT_PANELS]
             )
             for pname in panel_names:
                 results.append((ticker, pname, "fetch_error", False))
             continue
 
-        panels_to_run = (
-            _SYNTHESIS_PANELS if panel_filter == "synthesis" else _DEFAULT_PANELS
-        )
+        panels_to_run = _SINGLE_PANEL_SETS.get(panel_filter, _DEFAULT_PANELS)
 
         for pname, gen_fn in panels_to_run:
             try:
@@ -388,6 +397,12 @@ def section_b(tickers: list[str] | None = None, panel_filter: str | None = None)
             # Synthesis: print full JSON + ValidationResult, then continue
             if pname == "synthesis":
                 _print_synthesis(ticker, year, panel, vr)
+                results.append((ticker, pname, panel.status, True))
+                continue
+
+            # Add-back adversary: same full-JSON treatment
+            if pname == "addback_adversary":
+                _print_addback(ticker, year, panel, vr)
                 results.append((ticker, pname, panel.status, True))
                 continue
 
@@ -441,6 +456,20 @@ def _print_synthesis(ticker: str, year: int, panel: AnchoredSynthesisPanel, vr: 
     print(f"\n  [{mark}] synthesis: status={panel.status}")
 
 
+def _print_addback(ticker: str, year: int, panel: AddBackAdversaryPanel, vr: ValidationResult) -> None:
+    print(f"\n{'=' * 70}")
+    print(f"AddBackAdversaryPanel JSON  ({ticker} FY{year})")
+    print("=" * 70)
+    print(panel.model_dump_json(indent=2))
+    print(f"\nValidationResult:")
+    print(f"  passed    : {vr.passed}")
+    print(f"  violations: {len(vr.violations)}")
+    for v in vr.violations:
+        print(f"    field={v.field_path!r}  token={v.raw_token!r}  reason={v.reason!r}")
+    mark = "PASS" if panel.status == "ok" else ("WARN" if panel.status == "validation_failed" else "GAP")
+    print(f"\n  [{mark}] addback_adversary: status={panel.status}")
+
+
 def _count_claims(panel: object) -> int:
     count = 0
     field_names = type(panel).model_fields if hasattr(type(panel), "model_fields") else {}
@@ -462,6 +491,7 @@ def main() -> int:
     #   python scripts/verify_panels.py                       → all tickers, all panels
     #   python scripts/verify_panels.py MSFT                  → MSFT only, all panels
     #   python scripts/verify_panels.py MSFT --panel synthesis → MSFT, synthesis only
+    #   python scripts/verify_panels.py CRM --panel addback_adversary → CRM, add-back adversary only
     args = list(sys.argv[1:])
     panel_filter: str | None = None
     if "--panel" in args:
@@ -471,7 +501,7 @@ def main() -> int:
             return 1
         panel_filter = args[idx + 1].lower()
         args = args[:idx] + args[idx + 2:]
-    _KNOWN_PANELS = {"synthesis", "business_summary", "risks", "revenue_drivers", "qoe_candidates"}
+    _KNOWN_PANELS = {"synthesis", "addback_adversary", "business_summary", "risks", "revenue_drivers", "qoe_candidates"}
     if panel_filter and panel_filter not in _KNOWN_PANELS:
         print(f"ERROR: unknown panel {panel_filter!r}. Known: {sorted(_KNOWN_PANELS)}")
         return 1
