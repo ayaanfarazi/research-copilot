@@ -28,5 +28,6 @@ class AddBackAdversaryPanel(BaseModel):
     accept_case: str                     # the case FOR the add-backs; must name add-back figure_ids
     challenge_case: str                  # the skeptical credit case AGAINST; must name add-back figure_ids
     leverage_read: str                   # base vs adjusted leverage; which to anchor; name both figure_ids
+    excluded_candidate_read: str         # resolved-but-excluded add-back candidates: management's potential add-back case vs the credit rejection; confirm exclusion; name each excluded figure_id (or state none present)
     confidence_caveats: list[str]        # one entry per cited LOW/NOT_FOUND/not_meaningful/anomaly/net_cash figure
     citations: list[Citation]            # kind="figure", excerpt=null only

@@ -7,6 +7,7 @@ from src.data.models import (
     make_figure_id,
 )
 from src.documents.models import FilingDocument
+from src.metrics.qoe import EXCLUDED_ADDBACKS
 from src.llm.allowlist import build_enumerated_allowlist
 from src.llm.client import structured_call
 from src.llm.schemas.addback_adversary import AddBackAdversaryPanel
@@ -31,7 +32,7 @@ STRICT RULES — violating any causes rejection:
 1. Do not write any numeric values in any text field (headline, accept_case, challenge_case, leverage_read, confidence_caveats). This includes dollar amounts, percentages, ratios, multiples, basis points, and counts. Reference every quantitative magnitude by citing its figure_id.
 2. Do not write any specific year, fiscal period, or calendar date (e.g., "2024", "fiscal 2023") in a text field, except as it appears inside a figure_id token (e.g., "sbc:FY2024").
 3. Every Citation must have kind="figure", ref="<figure_id>", excerpt=null. No section citations.
-4. accept_case and challenge_case must EACH name at least one add-back figure_id inline (e.g., "sbc:FY2024"). leverage_read must name BOTH net_leverage and adjusted_net_leverage by figure_id inline. Every figure_id named in any text field must have a corresponding Citation in citations.
+4. accept_case and challenge_case must EACH name at least one add-back figure_id inline (e.g., "sbc:FY2024"). leverage_read must name BOTH net_leverage and adjusted_net_leverage by figure_id inline. Every figure_id named in any text field must have a corresponding Citation in citations. excluded_candidate_read must name each excluded add-back candidate figure_id listed under EXCLUDED ADD-BACK CANDIDATES (e.g., contract_cost_amort:FY2024) inline, each with a corresponding Citation; if none is present, say so and add no citation for it.
 5. verdict must be exactly one of: "adjusted_fair", "haircut_warranted", "reject_adjustments".
 6. Set status="ok".
 
@@ -42,6 +43,7 @@ ADVERSARIAL CONTRACT:
 - leverage_read: contrast base net_leverage against adjusted_net_leverage. State which a conservative credit analyst should anchor on given the quality of the add-backs, and why. Cite both figure_ids.
 - verdict: adjusted_fair = add-backs are legitimate and adjusted_net_leverage is the fair anchor; haircut_warranted = some add-backs (typically SBC) should be partially clawed back and true leverage sits between the two; reject_adjustments = add-backs are aggressive, anchor on base net_leverage.
 - Address each add-back category listed as INCLUDED in the add-back context. Do not invent add-backs that are not listed as included.
+- excluded_candidate_read: for each resolved-but-excluded candidate, give (a) the case management could make for adding it back, and (b) the conservative credit rejection — why a careful analyst keeps it OUT of adjusted EBITDA (contract-cost / deferred-commission amortization is a recurring, real cost of acquiring revenue, not a one-time or non-cash item). Confirm it remains EXCLUDED. Cite each by figure_id. Never recompute leverage including it.
 
 CONFIDENCE PROPAGATION RULE (hard — violations are flagged in post-processing):
 For every figure_id you cite whose ConfidenceTier is LOW or NOT_FOUND, or whose status is not_meaningful, anomaly, or net_cash, you MUST:
@@ -58,6 +60,7 @@ OUTPUT FIELDS:
 - challenge_case: the skeptical credit case against; name add-back figure_ids.
 - leverage_read: base net_leverage vs adjusted_net_leverage; which to anchor on; name both figure_ids.
 - confidence_caveats: one item per cited figure with LOW/NOT_FOUND/not_meaningful/anomaly/net_cash status.
+- excluded_candidate_read: resolved-but-excluded add-back candidates — management's potential add-back case vs the credit rejection; confirm exclusion; name each excluded figure_id (or state none present).
 - citations: all figure_id references used; kind="figure", excerpt=null.\
 """
 
@@ -172,12 +175,29 @@ def _build_addback_context(
             f"confidence={conf}{marker}"
         )
 
+    excluded_lines: list[str] = []
+    for category, label, reason in EXCLUDED_ADDBACKS:
+        fig = financials.get(category, year)
+        fid = make_figure_id(category, year)
+        if fig is None or fig.value is None:
+            excluded_lines.append(f"  {fid:<44}  NOT PRESENT")
+            continue
+        conf = fig.confidence.value
+        status = getattr(fig, "status", "ok")
+        excluded_lines.append(
+            f"  {fid:<44}  label={label!r:<26}  status={status}  "
+            f"confidence={conf}  EXCLUDED (resolved, not added back; {reason})"
+        )
+
     context = (
         "=== ADD-BACK CATEGORIES (included if present; labels/status only, no values) ===\n"
         + "\n".join(cat_lines)
         + "\n\n"
         "=== BRIDGE OUTPUT / LEVERAGE FIGURES (labels/status only, no values) ===\n"
         + "\n".join(crux_lines)
+        + "\n\n"
+        "=== EXCLUDED ADD-BACK CANDIDATES (resolved + citeable, but NOT in adjusted EBITDA) ===\n"
+        + "\n".join(excluded_lines)
     )
     return context, flagged
 

@@ -23,7 +23,7 @@ _ADD_BACKS: tuple[tuple[AddBackCategory, str], ...] = (
     ("impairment", "Impairments"),
 )
 
-_EXCLUDED_ADDBACKS: tuple[tuple[str, str, str], ...] = (
+EXCLUDED_ADDBACKS: tuple[tuple[str, str, str], ...] = (
     (
         "contract_cost_amort",
         "Contract cost amortization",
@@ -180,7 +180,7 @@ def _mark_excluded_addbacks(store: FigureStore, year: int) -> list[QoEExcludedAd
     Value and confidence are never mutated — only a one-time note is appended.
     """
     out: list[QoEExcludedAddBack] = []
-    for category, label, reason in _EXCLUDED_ADDBACKS:
+    for category, label, reason in EXCLUDED_ADDBACKS:
         fig = store.get(category, year)
         if fig is None or fig.value is None:
             continue
