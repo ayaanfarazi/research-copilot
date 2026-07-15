@@ -228,6 +228,14 @@ def _load_cached_brief(ticker: str) -> Brief | None:
     return Brief.model_validate_json(matches[-1].read_text())
 
 
+def has_cached_brief(ticker: str) -> bool:
+    """True when a cached Brief exists for `ticker` (a pure-view app can check this
+    to avoid triggering an API rebuild on a cache miss)."""
+    if not BRIEF_CACHE_DIR.exists():
+        return False
+    return any(BRIEF_CACHE_DIR.glob(f"{ticker.upper()}_FY*.json"))
+
+
 def _write_cached_brief(brief: Brief) -> Path:
     BRIEF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _cache_path(brief.ticker, brief.fiscal_year)
