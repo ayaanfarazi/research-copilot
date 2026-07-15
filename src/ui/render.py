@@ -20,6 +20,7 @@ import streamlit as st
 
 from src.brief import Brief
 from src.data.models import ConfidenceTier, make_figure_id
+from src.llm.schemas.citations import Claim
 
 # ---------------------------------------------------------------------------
 # Confidence badges (build_plan.md §6 component 3)
@@ -115,8 +116,7 @@ def render_figure(brief: Brief, concept: str, year: int, label: str | None = Non
     if fig is None:
         st.markdown(f"**{display_label}:** :red[not found — see filing]")
         with st.expander("🔍 source"):
-            st.markdown(f"- **figure_id:** `{figure_id}`")
-            st.markdown("- no figure was produced for this concept and year")
+            render_source(brief, figure_id)
         return None
 
     return render_figure_object(brief, fig, display_label)
@@ -129,7 +129,7 @@ def render_figure_by_id(brief: Brief, figure_id: str, label: str | None = None) 
     if fig is None:
         st.markdown(f"**{display_label}:** :red[not found — see filing]")
         with st.expander("🔍 source"):
-            st.markdown(f"- **figure_id:** `{figure_id}` (not present)")
+            render_source(brief, figure_id)
         return None
     return render_figure_object(brief, fig, display_label)
 
@@ -149,8 +149,24 @@ def render_figure_object(brief: Brief, fig: object, display_label: str) -> objec
     st.markdown("  ".join(parts))
 
     with st.expander("🔍 source"):
-        _render_provenance(fig)
+        render_source(brief, fig.figure_id)
     return fig
+
+
+def render_source(brief: Brief, figure_id: str) -> None:
+    """The single provenance drill-down in the app.
+
+    Given a figure_id, render its full, independently-computed source: XBRL tag /
+    period / accession for a fact; formula / components / reconciliation / notes for
+    a computed metric. A rendered number and an LLM claim's figure-citation open THIS
+    identical body — there is exactly one provenance UX in the app.
+    """
+    fig = brief.fin.figures.get(figure_id)
+    if fig is None:
+        st.markdown(f"- **figure_id:** `{figure_id}`")
+        st.markdown("- no independently-computed figure exists for this id")
+        return
+    _render_provenance(fig)
 
 
 def _render_provenance(fig: object) -> None:
@@ -346,3 +362,222 @@ def render_degraded_status(brief: Brief) -> None:
     )
     if fin.status_detail:
         st.markdown(f"**Reason:** {fin.status_detail}")
+
+
+# ===========================================================================
+# LLM panels (Phase 3, Step 3) — claim→source drill-down
+#
+# The credibility centerpiece: an AI-written claim's figure-citation opens the
+# SAME render_source() drill-down as any rendered number, so a reader can always
+# check the AI against the independently-computed figure underneath it.
+# ===========================================================================
+
+# Human labels for the 10-K sections a claim can be lifted from.
+_SECTION_LABELS = {
+    "item_1": "Item 1 — Business",
+    "item_1a": "Item 1A — Risk Factors",
+    "item_7": "Item 7 — MD&A",
+    "debt_footnote": "Debt footnote (Item 8)",
+}
+
+# Panel self-reported status -> honest badge. "ok" gets no badge.
+_PANEL_STATUS_BADGE = {
+    "validation_failed": ":orange[**⚠ did not fully validate this run**]",
+    "confidence_gap": ":orange[**⚠ confidence gap — a flagged figure was not caveated**]",
+    "parse_error": ":orange[**⚠ output could not be parsed this run**]",
+}
+
+# Reasoning-panel verdict -> (display text, color).
+_SYNTHESIS_VERDICT = {
+    "can_service": ("CAN SERVICE", "green"),
+    "conditional": ("CONDITIONAL", "orange"),
+    "cannot_service": ("CANNOT SERVICE", "red"),
+}
+_ADDBACK_VERDICT = {
+    "adjusted_fair": ("ADJUSTED EBITDA FAIR", "green"),
+    "haircut_warranted": ("HAIRCUT WARRANTED", "orange"),
+    "reject_adjustments": ("REJECT ADJUSTMENTS", "red"),
+}
+
+
+def _render_panel_status(status: str | None) -> None:
+    """Render the honest per-panel status badge (nothing for a clean 'ok')."""
+    badge = _PANEL_STATUS_BADGE.get(status or "")
+    if badge:
+        st.markdown(badge)
+
+
+def _render_citation(brief: Brief, citation: object) -> None:
+    """Render one citation: a figure opens render_source; a section quotes the filing."""
+    if citation.kind == "figure":
+        with st.expander(f"🔍 figure source — `{citation.ref}`"):
+            render_source(brief, citation.ref)
+    else:  # section
+        section = _SECTION_LABELS.get(citation.ref, citation.ref)
+        excerpt = (citation.excerpt or "").strip()
+        if excerpt:
+            st.markdown(f"↳ verbatim from **{section}**:")
+            st.markdown(f"> {excerpt}")
+        else:
+            st.caption(f"↳ cited to {section} (no excerpt supplied)")
+
+
+def render_claim(brief: Brief, claim: object, year: int) -> None:
+    """The credibility centerpiece: a claim's text + each citation's drill-down.
+
+    Figure citations open the identical render_source() panel as any rendered
+    number; section citations quote the verbatim filing passage.
+    """
+    text = (getattr(claim, "text", "") or "").strip()
+    st.markdown(text if text else "_(no content surfaced this run)_")
+    for citation in getattr(claim, "citations", None) or []:
+        _render_citation(brief, citation)
+
+
+def _render_reasoning_claim(brief: Brief, label: str, text: str, citations: list, year: int) -> None:
+    """Render a reasoning-panel prose clause as a claim.
+
+    When the panel supplied figure citations, route the clause through render_claim
+    (synthesizing a Claim from prose + the panel's figure citations) so the clause's
+    figure-anchors are expandable via the same claim→source UX. Otherwise render the
+    prose alone (an empty/validation shell keeps valid empty content, never a crash).
+    """
+    st.markdown(f"**{label}**")
+    text = (text or "").strip()
+    if citations:
+        render_claim(brief, Claim(text=text or " ", citations=list(citations)), year)
+    else:
+        st.markdown(text if text else "_(no content surfaced this run)_")
+
+
+def _render_caveats(caveats: list) -> None:
+    caveats = [c for c in (caveats or []) if (c or "").strip()]
+    if caveats:
+        st.markdown("**Confidence caveats:**")
+        for c in caveats:
+            st.markdown(f"- {c}")
+
+
+# --- Panel A: anchored synthesis (the money-shot, rendered first) -----------
+
+def render_synthesis_panel(brief: Brief) -> None:
+    env = brief.synthesis
+    st.subheader("🧭 Panel A — Anchored credit synthesis")
+    if env is None:
+        st.info("Synthesis panel was not generated for this brief.")
+        return
+    panel = env.panel
+    year = brief.fiscal_year
+
+    verdict_txt, verdict_color = _SYNTHESIS_VERDICT.get(
+        getattr(panel, "verdict", None), (str(getattr(panel, "verdict", "—")).upper(), "gray")
+    )
+    st.markdown(f"### Verdict: :{verdict_color}[**{verdict_txt}**]")
+    _render_panel_status(env.validation.status)
+
+    # Thesis is the load-bearing claim; its figure-anchors are expandable.
+    _render_reasoning_claim(brief, "Thesis", getattr(panel, "thesis", ""), panel.citations, year)
+    st.markdown(f"**Spine reading.** {(getattr(panel, 'spine_reading', '') or '').strip() or '—'}")
+    st.markdown(f"**Swing factor.** {(getattr(panel, 'swing_factor', '') or '').strip() or '—'}")
+    _render_caveats(getattr(panel, "confidence_caveats", []))
+
+
+# --- Panel B: add-back adversary (bull vs skeptic) --------------------------
+
+def render_addback_panel(brief: Brief) -> None:
+    env = brief.addback_adversary
+    st.subheader("⚖️ Panel B — Add-back adversary")
+    if env is None:
+        st.info("Add-back adversary panel was not generated for this brief.")
+        return
+    panel = env.panel
+    year = brief.fiscal_year
+
+    verdict_txt, verdict_color = _ADDBACK_VERDICT.get(
+        getattr(panel, "verdict", None), (str(getattr(panel, "verdict", "—")).upper(), "gray")
+    )
+    st.markdown(f"### Verdict: :{verdict_color}[**{verdict_txt}**]")
+    _render_panel_status(env.validation.status)
+
+    st.markdown(f"{(getattr(panel, 'headline', '') or '').strip() or '_(no headline this run)_'}")
+
+    # Bull vs skeptic — each side cited via render_claim over the add-back figures.
+    _render_reasoning_claim(brief, "🟢 Accept case (bull)", getattr(panel, "accept_case", ""), panel.citations, year)
+    _render_reasoning_claim(brief, "🔴 Challenge case (skeptic)", getattr(panel, "challenge_case", ""), panel.citations, year)
+    st.markdown(f"**Leverage read.** {(getattr(panel, 'leverage_read', '') or '').strip() or '—'}")
+    st.markdown(f"**Excluded candidates.** {(getattr(panel, 'excluded_candidate_read', '') or '').strip() or '—'}")
+    _render_caveats(getattr(panel, "confidence_caveats", []))
+
+
+# --- Descriptive panels -----------------------------------------------------
+
+def _render_claim_list(brief: Brief, claims: list, year: int, empty_msg: str) -> None:
+    claims = list(claims or [])
+    real = [c for c in claims if (getattr(c, "text", "") or "").strip()]
+    if not real:
+        st.markdown(f"_{empty_msg}_")
+        return
+    for claim in real:
+        render_claim(brief, claim, year)
+
+
+def render_business_summary_panel(brief: Brief) -> None:
+    env = brief.business_summary
+    st.subheader("🏢 Business summary")
+    if env is None:
+        st.info("Business summary was not generated for this brief.")
+        return
+    panel, year = env.panel, brief.fiscal_year
+    _render_panel_status(env.validation.status)
+    headline = getattr(panel, "headline", None)
+    if headline is not None and (getattr(headline, "text", "") or "").strip():
+        render_claim(brief, headline, year)
+    else:
+        st.markdown("_(no headline surfaced this run)_")
+    st.markdown("**Business lines**")
+    _render_claim_list(brief, getattr(panel, "business_lines", []), year, "No segments surfaced this run.")
+
+
+def render_risks_panel(brief: Brief) -> None:
+    env = brief.risks
+    st.subheader("⚠️ Company-specific risks")
+    if env is None:
+        st.info("Risks panel was not generated for this brief.")
+        return
+    panel, year = env.panel, brief.fiscal_year
+    _render_panel_status(env.validation.status)
+    _render_claim_list(
+        brief, getattr(panel, "company_specific_risks", []), year,
+        "No company-specific risks surfaced this run.",
+    )
+    note = (getattr(panel, "boilerplate_note", None) or "").strip()
+    if note:
+        st.caption(f"Boilerplate note: {note}")
+
+
+def render_revenue_drivers_panel(brief: Brief) -> None:
+    env = brief.revenue_drivers
+    st.subheader("📈 Revenue drivers")
+    if env is None:
+        st.info("Revenue drivers panel was not generated for this brief.")
+        return
+    panel, year = env.panel, brief.fiscal_year
+    _render_panel_status(env.validation.status)
+    st.markdown("**Drivers**")
+    _render_claim_list(brief, getattr(panel, "drivers", []), year, "No drivers surfaced this run.")
+    st.markdown("**Segment commentary**")
+    _render_claim_list(brief, getattr(panel, "segment_commentary", []), year, "No segment commentary this run.")
+
+
+def render_qoe_candidates_panel(brief: Brief) -> None:
+    env = brief.qoe_candidates
+    st.subheader("🔎 Quality-of-earnings candidates")
+    if env is None:
+        st.info("QoE candidates panel was not generated for this brief.")
+        return
+    panel, year = env.panel, brief.fiscal_year
+    _render_panel_status(env.validation.status)
+    _render_claim_list(
+        brief, getattr(panel, "claimed_one_time_items", []), year,
+        "No candidates surfaced this run.",
+    )

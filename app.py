@@ -18,22 +18,28 @@ import streamlit as st
 
 from src.brief import assemble_brief, has_cached_brief
 from src.ui.render import (
+    render_addback_panel,
+    render_business_summary_panel,
     render_covenant_panel,
     render_credit_panel,
     render_degraded_status,
     render_ebitda_bridge,
     render_header,
     render_operating_panel,
+    render_qoe_candidates_panel,
+    render_revenue_drivers_panel,
+    render_risks_panel,
     render_survival_panel,
+    render_synthesis_panel,
 )
 
 DEMO_TICKERS = ["MSFT", "VZ", "MCD", "NVDA", "CRM"]
 
-st.set_page_config(page_title="Credit Brief — deterministic layer", layout="wide")
+st.set_page_config(page_title="Credit Brief", layout="wide")
 
 # --- Sidebar: ticker selector over the five demo companies ------------------
 st.sidebar.title("Credit Brief")
-st.sidebar.caption("Deterministic layer (Phase 3, Step 2)")
+st.sidebar.caption("Deterministic figures + AI panels (Phase 3, Step 3)")
 ticker = st.sidebar.selectbox("Company", DEMO_TICKERS, index=0)
 st.sidebar.caption(
     "Pure view over a cached Brief — no live API calls. "
@@ -72,7 +78,33 @@ if brief.fin.status != "ok":
 
 st.divider()
 
-# --- Deterministic panels ---------------------------------------------------
+# --- AI reasoning + descriptive panels (money-shot: synthesis leads) --------
+# Every AI claim's figure-citation opens the SAME source drill-down as a
+# deterministic number, so the reader can always check the AI against the
+# independently-computed figure underneath it.
+st.header("AI analysis")
+st.caption(
+    "AI-written claims anchored to independently-computed figures. Expand any "
+    "🔍 figure source to check a claim against the deterministic number underneath it."
+)
+
+render_synthesis_panel(brief)          # Panel A — headline reasoning
+st.divider()
+render_addback_panel(brief)            # Panel B — bull vs skeptic
+
+st.divider()
+desc_left, desc_right = st.columns(2)
+with desc_left:
+    render_business_summary_panel(brief)
+    render_revenue_drivers_panel(brief)
+with desc_right:
+    render_risks_panel(brief)
+    render_qoe_candidates_panel(brief)
+
+st.divider()
+
+# --- Deterministic panels (the evidence base) -------------------------------
+st.header("Deterministic figures")
 left, right = st.columns(2)
 with left:
     render_credit_panel(brief)
@@ -84,7 +116,7 @@ with right:
 
 st.divider()
 st.caption(
-    "Deterministic figures only. Every value expands to its source (XBRL tag / "
-    "period / accession for facts; formula / components / reconciliation for "
-    "computed metrics). LLM panels are rendered in the next step."
+    "Every value — AI claim or computed number — expands to the same source: XBRL "
+    "tag / period / accession for facts; formula / components / reconciliation for "
+    "computed metrics."
 )
