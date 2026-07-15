@@ -225,21 +225,22 @@ def _render_provenance(fig: object) -> None:
 # ---------------------------------------------------------------------------
 
 def render_header(brief: Brief) -> None:
+    """Title + issuer identity. The scorecard band is its own orderable section
+    (render_scorecard_band) so the view toggle can place it per view."""
     fin = brief.fin
     st.title(f"{fin.entity_name} ({brief.ticker})")
 
-    c1, c2, c3 = st.columns([1, 2, 2])
+    c1, c2 = st.columns([1, 3])
     c1.metric("Anchor fiscal year", f"FY{brief.fiscal_year}")
     c2.markdown(
         f"**SIC {fin.sic or '—'}**  \n{fin.sic_description or 'industry n/a'}"
     )
-    with c3:
-        render_scorecard_band(brief)
 
 
 def render_scorecard_band(brief: Brief) -> None:
     """Render the anchor-year credit band, colored by tier, with an auditable expander."""
     year = brief.fiscal_year
+    st.subheader("🏦 Credit scorecard")
     band = brief.fin.figures.get(make_figure_id("credit_band", year))
     if band is None:
         st.markdown("**Credit band:** :gray[not computed]")

@@ -1,11 +1,15 @@
 """
-Credit-brief Streamlit app — Phase 3, Step 2 (deterministic layer only).
+Credit-brief Streamlit app — Phase 3, Step 4 (Investor/Credit view toggle).
 
 This app is a PURE VIEW over a cached Brief. It never blocks on live API work:
 it calls assemble_brief(ticker, use_cache=True) and reads the disk cache warmed by
-the assembler gate. The six LLM panels on the Brief are intentionally not rendered
-yet — that is the next packet. Every number here flows through render_figure, so
-each figure carries an expand-to-source drill-down.
+the assembler gate. Every number flows through render_figure, so each figure
+carries an expand-to-source drill-down.
+
+The Investor/Credit toggle changes ONLY ordering and emphasis (build_plan.md §4):
+the underlying Brief, every figure, and every panel body are identical across
+views — there is one set of panel-render calls, sequenced by a per-view list of
+section keys. Nothing is recomputed and no API is called when the view changes.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from src.ui.render import (
     render_qoe_candidates_panel,
     render_revenue_drivers_panel,
     render_risks_panel,
+    render_scorecard_band,
     render_survival_panel,
     render_synthesis_panel,
 )
@@ -39,11 +44,12 @@ st.set_page_config(page_title="Credit Brief", layout="wide")
 
 # --- Sidebar: ticker selector over the five demo companies ------------------
 st.sidebar.title("Credit Brief")
-st.sidebar.caption("Deterministic figures + AI panels (Phase 3, Step 3)")
+st.sidebar.caption("Deterministic figures + AI panels (Phase 3, Step 4)")
 ticker = st.sidebar.selectbox("Company", DEMO_TICKERS, index=0)
+view = st.sidebar.radio("View", ["Credit", "Investor"], index=0, key="view")
 st.sidebar.caption(
-    "Pure view over a cached Brief — no live API calls. "
-    "Cache is warmed by scripts/verify_brief.py."
+    "The view toggle reorders panels only — same cached Brief, no recompute, "
+    "no API. Cache is warmed by scripts/verify_brief.py."
 )
 
 # --- Data load: cache-only, never a blank page on failure -------------------
@@ -68,7 +74,7 @@ except Exception as exc:  # noqa: BLE001 — surface any load failure as a visib
     )
     st.stop()
 
-# --- Header + scorecard band ------------------------------------------------
+# --- Header ------------------------------------------------------------------
 render_header(brief)
 
 # --- Graceful degradation: no industrial brief for this filer ---------------
@@ -76,43 +82,51 @@ if brief.fin.status != "ok":
     render_degraded_status(brief)
     st.stop()
 
-st.divider()
+# --- One set of panel-render calls, keyed by section -------------------------
+# Each panel body is unchanged from the previous packet. The view toggle only
+# picks the ORDER these are called in; the Brief and every figure are identical.
+SECTIONS = {
+    "scorecard": render_scorecard_band,           # 🏦 Credit scorecard
+    "synthesis": render_synthesis_panel,          # 🧭 Panel A — anchored synthesis
+    "addback": render_addback_panel,              # ⚖️ Panel B — add-back adversary
+    "credit": render_credit_panel,                # Credit & capital structure
+    "ebitda": render_ebitda_bridge,               # EBITDA bridge
+    "survival": render_survival_panel,            # Survival / maturity wall
+    "covenant": render_covenant_panel,            # Covenant screen
+    "qoe": render_qoe_candidates_panel,           # QoE candidates
+    "business": render_business_summary_panel,    # Business summary
+    "operating": render_operating_panel,          # Operating performance
+    "revenue_drivers": render_revenue_drivers_panel,
+    "risks": render_risks_panel,                  # Company-specific risks
+}
 
-# --- AI reasoning + descriptive panels (money-shot: synthesis leads) --------
-# Every AI claim's figure-citation opens the SAME source drill-down as a
-# deterministic number, so the reader can always check the AI against the
-# independently-computed figure underneath it.
-st.header("AI analysis")
+# Per-view ordering (build_plan.md §4). Every section appears in both views —
+# the toggle changes sequence/emphasis, never which panels are reachable.
+VIEW_ORDER = {
+    # Credit: lead with the credit verdict; investor-facing panels support below.
+    "Credit": [
+        "scorecard", "synthesis", "credit", "ebitda", "survival", "covenant",
+        "addback", "qoe",
+        "business", "risks", "revenue_drivers", "operating",
+    ],
+    # Investor: lead with the equity story; credit machinery supports below.
+    "Investor": [
+        "business", "operating", "revenue_drivers",
+        "credit", "ebitda", "survival", "scorecard", "covenant",
+        "synthesis", "addback", "qoe", "risks",
+    ],
+}
+
 st.caption(
-    "AI-written claims anchored to independently-computed figures. Expand any "
-    "🔍 figure source to check a claim against the deterministic number underneath it."
+    f"**{view} view** — panels reordered for emphasis only. Same cached Brief, "
+    f"zero recompute. Every value expands to the same source drill-down."
 )
-
-render_synthesis_panel(brief)          # Panel A — headline reasoning
-st.divider()
-render_addback_panel(brief)            # Panel B — bull vs skeptic
-
-st.divider()
-desc_left, desc_right = st.columns(2)
-with desc_left:
-    render_business_summary_panel(brief)
-    render_revenue_drivers_panel(brief)
-with desc_right:
-    render_risks_panel(brief)
-    render_qoe_candidates_panel(brief)
-
 st.divider()
 
-# --- Deterministic panels (the evidence base) -------------------------------
-st.header("Deterministic figures")
-left, right = st.columns(2)
-with left:
-    render_credit_panel(brief)
-    render_survival_panel(brief)
-with right:
-    render_ebitda_bridge(brief)
-    render_covenant_panel(brief)
-    render_operating_panel(brief)
+for i, key in enumerate(VIEW_ORDER[view]):
+    if i:
+        st.divider()
+    SECTIONS[key](brief)
 
 st.divider()
 st.caption(
