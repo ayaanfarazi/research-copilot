@@ -82,6 +82,14 @@ VZ_GOLDEN = {
     "debt_current": 22_633_000_000,        # Balance Sheet -> "Debt maturing within one year"
     "debt_noncurrent": 121_381_000_000,     # Balance Sheet -> "Long-term debt"
     "total_debt": 144_014_000_000,          # = debt_current + debt_noncurrent (enter the sum you computed)
+    "contract_cost_amort": 3_400_000_000,   # accession 0000732712-25-000006, us-gaap "Capitalized Contract Cost, Amortization" = $3.4B (2024-01-01..2024-12-31)
+}
+
+# CRM (Salesforce) FY2024 -- contract-cost amortization oracle (ASC 340-40 deferred commissions).
+#   Filing: 10-K, fiscal year ended 2024-01-31.
+CRM_GOLDEN_FY = 2024
+CRM_GOLDEN = {
+    "contract_cost_amort": 1_925_000_000,   # "amortization of costs capitalized to obtain revenue contracts, net" = $1,925M (FY ended 2024-01-31)
 }
 
 # MCD (McDonald's) FY2024 -- negative-equity + debt-scope oracle (exercises B2 and B4).
@@ -305,7 +313,7 @@ def verify_independent_goldens(ck: Checks) -> None:
     Skips cleanly (and says so) for any golden set still left as None, so the harness
     stays green until you fill them, then becomes a real oracle for B2/B4.
     """
-    for tk, fy, gold in [("VZ", VZ_GOLDEN_FY, VZ_GOLDEN), ("MCD", MCD_GOLDEN_FY, MCD_GOLDEN)]:
+    for tk, fy, gold in [("VZ", VZ_GOLDEN_FY, VZ_GOLDEN), ("MCD", MCD_GOLDEN_FY, MCD_GOLDEN), ("CRM", CRM_GOLDEN_FY, CRM_GOLDEN)]:
         filled = {k: v for k, v in gold.items() if v is not None}
         if not filled:
             print(f"\n[{tk} FY{fy} independent golden] NOT POPULATED -- fill from the 10-K PDF, then re-run (skipped)")
