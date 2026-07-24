@@ -302,9 +302,62 @@ def section_a() -> bool:
         f"passed={r_a11.passed} violations={[v.reason for v in r_a11.violations]}",
     )
 
+    # A12/A13 — excerpt membership normalization (bullets + newlines + whitespace).
+    # The source renders list items with bullet glyphs and line breaks; a model that
+    # copies a contiguous span but drops the bullets/newlines must still verify.
+    bullet_src = (
+        "Our reportable segments are described below.\n"
+        "• Cloud services grew as demand accelerated.\n"
+        "• Advertising revenue expanded across platforms.\n"
+        "Overall performance reflected broad strength."
+    )
+    bdoc = _doc({"item_7": bullet_src})
+
+    # A12 — excerpt spans a bullet/newline boundary but IS contiguous in the source
+    # (differs only by bullets + line breaks) → must PASS under the looser matcher.
+    panel_a12 = RevenueDriversPanel(
+        drivers=[Claim(
+            text="Cloud demand accelerated and advertising expanded.",
+            citations=[Citation(kind="section", ref="item_7",
+                                excerpt="Cloud services grew as demand accelerated. "
+                                        "Advertising revenue expanded across platforms.")],
+        )],
+        segment_commentary=[],
+        figure_refs_used=[],
+    )
+    r_a12 = validate_output(panel_a12, al, document=bdoc, mode="strict")
+    all_ok &= _run_a_case(
+        "A12 — excerpt across bullets/newlines (contiguous in source) passes strict",
+        r_a12.passed, True,
+        f"passed={r_a12.passed} reasons={[v.reason for v in r_a12.violations]}",
+    )
+
+    # A13 — stitched excerpt (first sentence + last sentence, skipping the middle
+    # bullets) is NOT contiguous in the source → must FAIL excerpt_not_in_source.
+    panel_a13 = RevenueDriversPanel(
+        drivers=[Claim(
+            text="Segments were described and performance was broadly strong.",
+            citations=[Citation(kind="section", ref="item_7",
+                                excerpt="Our reportable segments are described below. "
+                                        "Overall performance reflected broad strength.")],
+        )],
+        segment_commentary=[],
+        figure_refs_used=[],
+    )
+    r_a13 = validate_output(panel_a13, al, document=bdoc, mode="strict")
+    all_ok &= _run_a_case(
+        "A13 — stitched non-contiguous excerpt fails strict (excerpt_not_in_source)",
+        r_a13.passed, False,
+        f"passed={r_a13.passed} reasons={[v.reason for v in r_a13.violations]}",
+    )
+    if not r_a13.passed:
+        assert any(v.reason == "excerpt_not_in_source" for v in r_a13.violations), (
+            "Expected excerpt_not_in_source in A13 violations"
+        )
+
     print()
     if all_ok:
-        print("SECTION A: ALL 11 CHECKS PASSED")
+        print("SECTION A: ALL 13 CHECKS PASSED")
     else:
         print("SECTION A: SOME CHECKS FAILED — fix before running Section B")
     return all_ok

@@ -16,7 +16,7 @@ STRICT RULES — violating any of these causes the output to be rejected:
 1. Do not write any numeric values in any text field. This includes dollar amounts, percentages, ratios, and any other number.
 2. Do not write any specific year, fiscal period, or calendar date (such as "2024", "fiscal 2023") directly in a text field. When a fact is date-bearing, state it qualitatively — "in recent periods", "following last year's acquisition" — and provide a section Citation whose excerpt is the verbatim passage from the source that contains the specific date.
 3. Every Claim must include at least one citation. An uncited claim is a validation failure.
-4. For section citations (kind="section"), the excerpt field must be a verbatim substring copied character-for-character from the provided Item 1A text. Do not paraphrase.
+4. For section citations (kind="section"), the excerpt field must be a single contiguous verbatim substring copied character-for-character from one place in the provided Item 1A text. Do not paraphrase, and do not stitch together non-adjacent sentences, headings, or bullet items — copy one continuous run of text.
 5. For figure citations (kind="figure"), set excerpt to null.
 6. Exclude generic boilerplate risks applicable to any public company — examples: "general economic conditions", "changes in interest rates", "competition from other companies". Include only risks specific to this company's business model, industry position, or capital structure.
 7. If boilerplate_note is needed (e.g., a note that some regulatory language appears generic), write it without any numbers or dates. If not needed, set it to null.

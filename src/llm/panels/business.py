@@ -16,7 +16,7 @@ STRICT RULES — violating any of these causes the output to be rejected:
 1. Do not write any numeric values in any text field. This includes dollar amounts, percentages, ratios, and any other number. To reference a quantitative fact, cite it by figure_id only in a citations entry.
 2. Do not write any specific year, fiscal period, or calendar date (such as "2024", "fiscal 2023") directly in a text field. When a fact is date-bearing, state it qualitatively — "in the most recent fiscal year", "since the prior acquisition" — and provide a section Citation whose excerpt is the verbatim passage from the source that contains the specific date.
 3. Every Claim must include at least one citation. An uncited claim is a validation failure.
-4. For section citations (kind="section"), the excerpt field must be a verbatim substring copied character-for-character from the provided Item 1 text. Do not paraphrase or truncate mid-word.
+4. For section citations (kind="section"), the excerpt field must be a single contiguous verbatim substring copied character-for-character from one place in the provided Item 1 text. Do not paraphrase or truncate mid-word, and do not stitch together non-adjacent sentences, headings, or bullet items — copy one continuous run of text.
 5. For figure citations (kind="figure"), set excerpt to null. Never set a non-null excerpt on a figure citation.
 6. Set status to "ok".\
 """

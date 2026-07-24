@@ -73,6 +73,31 @@ def _fold_typographic(s: str) -> str:
     return s
 
 
+# List-bullet / leader glyphs that a filing renders between list items but that a
+# model routinely drops (or keeps) when copying an excerpt. They carry no semantic
+# content for the verbatim-membership test, so we neutralize them to spaces on both
+# the excerpt and the source before the `in` check. Kept deliberately narrow to
+# clearly-decorative bullets — dashes are handled by _fold_typographic, and we do
+# not touch asterisks/hyphens which can be meaningful content.
+_BULLET_GLYPHS = "•▪‣·◦●○■□▸▹►◆"
+_BULLET_RE = re.compile(f"[{re.escape(_BULLET_GLYPHS)}]")
+
+
+def _normalize_for_membership(s: str) -> str:
+    """Normalization applied ONLY to the excerpt-in-source membership test.
+
+    Never mutates stored text. Folds typographic quote/dash/nbsp variants, spaces
+    out list-bullet glyphs, then collapses every whitespace run (spaces, tabs,
+    newlines) to a single space. Applied identically to excerpt and source so an
+    excerpt that IS present in the section — differing only by bullets, line
+    breaks, or collapsed whitespace — passes, while a genuinely absent or
+    non-contiguous (stitched) excerpt still fails.
+    """
+    s = _fold_typographic(s)
+    s = _BULLET_RE.sub(" ", s)
+    return _collapse_ws(s)
+
+
 def _check_numeric_tokens(
     text: str,
     allowlist: EnumeratedAllowlist,
@@ -153,8 +178,8 @@ def validate_output(
                 ref = obj.ref
                 section = document.sections.get(ref, "") if document else ""
                 if not section or (
-                    _fold_typographic(_collapse_ws(exc))
-                    not in _fold_typographic(_collapse_ws(section))
+                    _normalize_for_membership(exc)
+                    not in _normalize_for_membership(section)
                 ):
                     violations.append(ValidationViolation(
                         field_path=f"{path}.excerpt", raw_token="", canonical="",
@@ -193,8 +218,8 @@ def validate_output(
                 section = document.sections.get(ref, "") if document else ""
                 exc = obj["excerpt"]
                 if not section or (
-                    _fold_typographic(_collapse_ws(exc))
-                    not in _fold_typographic(_collapse_ws(section))
+                    _normalize_for_membership(exc)
+                    not in _normalize_for_membership(section)
                 ):
                     violations.append(ValidationViolation(
                         field_path=f"{path}.excerpt", raw_token="", canonical="",

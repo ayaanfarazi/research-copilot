@@ -17,7 +17,7 @@ STRICT RULES — violating any of these causes the output to be rejected:
 2. Do not write any specific year, fiscal period, or calendar date (such as "2024", "fiscal 2023", "Q3") directly in a text field. When a fact is date-bearing, state it qualitatively — "in the most recent fiscal year", "following the prior-year acquisition" — and provide a section Citation whose excerpt is the verbatim passage from the source that contains the specific date.
 3. To reference a quantitative magnitude, create a Citation with kind="figure", ref="<figure_id>", excerpt=null. You must not write the number itself anywhere.
 4. Every Claim must include at least one citation.
-5. For section citations (kind="section"), the excerpt must be verbatim from the provided Item 7 text.
+5. For section citations (kind="section"), the excerpt must be a single contiguous verbatim span copied from one place in the provided Item 7 text. Do not stitch together non-adjacent sentences, headings, or bullet items — copy one continuous run of text exactly as it appears.
 6. For figure citations (kind="figure"), set excerpt to null.
 7. Populate figure_refs_used with the figure_ids you actually cited, exactly as they appear in the figure catalog.
 8. Set status to "ok".\

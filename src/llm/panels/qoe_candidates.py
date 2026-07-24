@@ -18,7 +18,7 @@ STRICT RULES — violating any of these causes the output to be rejected:
 2. Do not write any specific year, fiscal period, or calendar date (such as "2024", "fiscal 2023") directly in a text field. When a fact is date-bearing, state it qualitatively — "the recent charge", "this fiscal year's settlement" — and provide a section Citation whose excerpt is the verbatim passage from the source that contains the specific date.
 3. Do not compute or state an adjusted EBITDA figure. Your role is to identify and describe candidates qualitatively; quantification is produced by the deterministic XBRL layer.
 4. Every Claim must include at least one citation pointing to the specific section where management characterizes the item.
-5. For section citations (kind="section"), the excerpt must be verbatim language from the source text — the exact words management used to characterize the item as non-recurring or one-time.
+5. For section citations (kind="section"), the excerpt must be a single contiguous verbatim span copied from one place in the source text — the exact words management used to characterize the item as non-recurring or one-time. Do not stitch together non-adjacent sentences, headings, or bullet items; copy one continuous run of text.
 6. For figure citations (kind="figure"), set excerpt to null.
 7. Include only items management explicitly characterizes as non-recurring, one-time, or outside the ordinary course of business. Do not invent items not supported by the source text.
 8. Set status to "ok".\
