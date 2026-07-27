@@ -45,12 +45,19 @@ _TIER_BADGE = {
     ConfidenceTier.NOT_FOUND: ":red[**✗ see filing**]",
 }
 
-# Credit-band label -> Streamlit markdown color.
-_BAND_COLOR = {
-    "strong": "green",
-    "adequate": "blue",
-    "stretched": "orange",
-    "distressed": "red",
+# Semantic tokens -> presentation. One vocabulary for both the banner (a colored
+# callout box) and the tiles (colored tier words), so a band and its dimensions
+# read as one system. success=green, neutral=gray, warning=amber, danger=red.
+_TOKEN_COLOR = {"success": "green", "neutral": "gray", "warning": "orange", "danger": "red"}
+
+# Credit-band label -> semantic token. adequate/moderate are neutral (not a
+# verdict either way); only strong is success, only distressed is danger.
+_BAND_TOKEN = {
+    "strong": "success",
+    "adequate": "neutral",
+    "moderate": "neutral",
+    "stretched": "warning",
+    "distressed": "danger",
 }
 
 # Covenant screen flag -> color.
@@ -428,19 +435,228 @@ def render_header(brief: Brief) -> None:
     )
 
 
+# The four scorecard dimensions, in the order the mockup shows them.
+_SCORECARD_DIMS = ("leverage", "coverage", "trajectory", "liquidity")
+_DIM_NAME = {
+    "leverage": "Leverage",
+    "coverage": "Coverage",
+    "trajectory": "Trajectory",
+    "liquidity": "Liquidity",
+}
+
+# Underlying-trend labels for the trajectory dimension (deleveraging_trajectory).
+_TRAJ_SEVERITY = {"improving": 0, "flat": 1, "worsening": 2}
+
+
+def _sev_token(sev: float | int | None) -> str:
+    """Severity 0-3 -> semantic token. Missing severity is neutral, never a verdict."""
+    if sev is None:
+        return "neutral"
+    return {0: "success", 1: "neutral", 2: "warning", 3: "danger"}.get(int(sev), "neutral")
+
+
+def _cap(word: str) -> str:
+    return word[:1].upper() + word[1:] if word else word
+
+
+def _band_is_withheld(band: object) -> bool:
+    """True when no credit verdict is presented (degraded / issuer type doesn't fit)."""
+    label = getattr(band, "label", None) or ""
+    return (
+        getattr(band, "status", None) == "not_found"
+        or label.startswith("not_applicable")
+        or label == "not_assessable"
+    )
+
+
+def _withheld_reason(band: object) -> str:
+    """A plain sentence for why the credit framing is withheld, pulled from notes."""
+    label = getattr(band, "label", None) or ""
+    notes = getattr(band, "notes", None) or []
+    if label.startswith("not_applicable"):
+        return notes[0] if notes else "The industrial credit framing does not apply to this issuer type."
+    if label == "not_assessable":
+        return (
+            "Both leverage and coverage are missing for this filing, so a credit "
+            "band can't be assessed."
+        )
+    return notes[0] if notes else "A credit band is not available for this issuer."
+
+
+# --- Banner summary clauses (derived from the spine dimensions) ---------------
+_LEV_CLAUSE = {
+    "net cash": "net cash balance sheet", "strong": "low leverage",
+    "adequate": "moderate leverage", "stretched": "elevated leverage",
+    "distressed": "very high leverage", "earnings negative": "negative earnings",
+}
+_COV_CLAUSE = {
+    "strong": "very high interest coverage", "adequate": "solid interest coverage",
+    "stretched": "thin interest coverage", "distressed": "weak interest coverage",
+    "earnings negative": "negative earnings",
+}
+_LIQ_SUMMARY = {
+    "comfortable": "no near-term servicing risk", "adequate": "adequate near-term liquidity",
+    "tight": "tight near-term liquidity", "acute": "acute liquidity pressure",
+}
+_BAND_SUMMARY_FALLBACK = {
+    "strong": "Comfortable credit profile.", "adequate": "Adequate credit profile.",
+    "stretched": "Stretched credit profile.", "distressed": "Distressed credit profile.",
+}
+
+
+def _score_label(brief: Brief, dim: str, year: int) -> str | None:
+    fig = brief.fin.figures.get(make_figure_id(f"score_{dim}", year))
+    return getattr(fig, "label", None) if fig is not None else None
+
+
+def _band_summary(brief: Brief, band: object, year: int) -> str:
+    """A one-line plain summary composed from the leverage / coverage / liquidity
+    tiers (with a band-label fallback), matching the mockup's summary line."""
+    clauses = [
+        _LEV_CLAUSE.get(_score_label(brief, "leverage", year) or ""),
+        _COV_CLAUSE.get(_score_label(brief, "coverage", year) or ""),
+        _LIQ_SUMMARY.get(_score_label(brief, "liquidity", year) or ""),
+    ]
+    clauses = [c for c in clauses if c]
+    if clauses:
+        sentence = ", ".join(clauses)
+        return _cap(sentence) + "."
+    return _BAND_SUMMARY_FALLBACK.get(band.label or "", "Credit profile summary unavailable.")
+
+
+def _rule_line(band: object) -> str:
+    """One muted plain-English sentence for how the band is set, read from the band's
+    own rule note / formula so it stays honest if the mechanism changes."""
+    rule_note = ""
+    for n in getattr(band, "notes", None) or []:
+        if n.strip().lower().startswith("rule:"):
+            rule_note = n
+            break
+    hay = f"{rule_note} {getattr(band, 'formula', '') or ''}".lower()
+
+    clauses: list[str] = []
+    if "weakest" in hay:
+        clauses.append("the weakest of leverage and coverage sets the band")
+    if "downgrade" in hay:
+        clauses.append("a worsening trajectory can only downgrade it")
+    if "flag" in hay:
+        clauses.append("liquidity is flagged but never moves it")
+
+    if clauses:
+        return "Rule: " + ", ".join(clauses) + "."
+    if rule_note:
+        return "Rule: " + rule_note.split(":", 1)[1].strip()
+    return "Rule: the weakest measured dimension sets the band."
+
+
+def _dimension_tier(brief: Brief, dim: str, year: int) -> tuple[str, int | None]:
+    """The tier word + severity to show for a dimension tile.
+
+    Leverage / coverage / liquidity use their score_* tier. Trajectory shows the real
+    YoY leverage trend (improving/flat/worsening) — that's what a reader means by
+    "trajectory" — since the score collapses to "net cash (trajectory not binding)"
+    for net-cash issuers; whether it actually binds is explained by the rule line.
+    """
+    score = brief.fin.figures.get(make_figure_id(f"score_{dim}", year))
+    if score is None or score.value is None:
+        return "no data", None
+    sev = int(score.value)
+    label = score.label or "no data"
+
+    if dim == "trajectory":
+        traj = brief.fin.figures.get(make_figure_id("deleveraging_trajectory", year))
+        tl = getattr(traj, "label", None)
+        if tl in _TRAJ_SEVERITY:
+            return tl, _TRAJ_SEVERITY[tl]
+
+    return label.split(" (")[0].strip(), sev
+
+
+# --- Tile captions (derived from the key underlying figure where cheap) -------
+_TRAJ_CAPTION = {
+    "improving": "leverage fell YoY", "flat": "leverage flat YoY",
+    "worsening": "leverage rose YoY",
+}
+_LIQ_CAPTION = {
+    "comfortable": "cash covers near-term debt", "adequate": "adequate near-term cover",
+    "tight": "tight near-term cover", "acute": "thin near-term cover",
+}
+_CAPTION_FALLBACK = {
+    "leverage": "leverage vs. earnings", "coverage": "earnings vs. interest",
+    "trajectory": "leverage trend YoY", "liquidity": "near-term liquidity",
+}
+
+
+def _dimension_caption(brief: Brief, dim: str, year: int, word: str) -> str:
+    if dim == "coverage":
+        ic = brief.fin.figures.get(make_figure_id("interest_coverage", year))
+        v = getattr(ic, "value", None)
+        if v is not None and getattr(ic, "status", None) not in ("not_meaningful", "not_found"):
+            n = f"{v:.0f}" if v >= 10 else f"{v:.1f}"
+            return f"earnings cover interest {n}×"
+    if dim == "leverage":
+        nl = brief.fin.figures.get(make_figure_id("net_leverage", year))
+        if getattr(nl, "status", None) == "net_cash":
+            return "net cash vs. earnings"
+        v = getattr(nl, "value", None)
+        if v is not None:
+            return f"net debt ≈ {v:.1f}× earnings"
+    if dim == "trajectory":
+        return _TRAJ_CAPTION.get(word, _CAPTION_FALLBACK["trajectory"])
+    if dim == "liquidity":
+        return _LIQ_CAPTION.get(word, _CAPTION_FALLBACK["liquidity"])
+    return _CAPTION_FALLBACK[dim]
+
+
+def _render_scorecard_tiles(brief: Brief, year: int) -> None:
+    """A responsive row of four dimension tiles (four across; stacks on narrow width)."""
+    cols = st.columns(len(_SCORECARD_DIMS))
+    for col, dim in zip(cols, _SCORECARD_DIMS):
+        word, sev = _dimension_tier(brief, dim, year)
+        color = _TOKEN_COLOR[_sev_token(sev)]
+        caption = _dimension_caption(brief, dim, year, word)
+        with col:
+            st.markdown(f":gray[{_DIM_NAME[dim]}]")
+            st.markdown(f"### :{color}[{_cap(word)}]")
+            st.caption(caption)
+
+
 def render_scorecard_band(brief: Brief) -> None:
-    """Render the anchor-year credit band, colored by tier, with an auditable expander."""
+    """Credit-standing banner + scorecard-as-tiles + the plain-English rule line.
+
+    The banner is a semantic callout coloured by band (success/neutral/warning/
+    danger); a withheld band renders a neutral informational banner that says why —
+    never a colored verdict, never blank. Every tier still traces via render_source.
+    """
     year = brief.fiscal_year
-    st.subheader("🏦 Credit scorecard")
     band = brief.fin.figures.get(make_figure_id("credit_band", year))
+
     if band is None:
-        st.markdown("**Credit band:** :gray[not computed]")
+        st.info(
+            "**Credit standing: not available** — the scorecard was not computed "
+            "for this filing.",
+            icon="ℹ️",
+        )
+        return
+
+    # Degraded: issuer type / data doesn't fit the industrial credit framing.
+    if _band_is_withheld(band):
+        st.info(f"**Credit standing: not assessed**  \n{_withheld_reason(band)}", icon="ℹ️")
+        with st.expander("🔍 source"):
+            render_source(brief, band.figure_id)
         return
 
     label = band.label or "unknown"
-    color = _BAND_COLOR.get(label, "gray")
-    st.markdown(f"**Credit band (FY{year}):** :{color}[**{label.upper()}**]")
-    with st.expander("🔍 how this band was reached"):
+    token = _BAND_TOKEN.get(label, "neutral")
+    callout = {"success": st.success, "neutral": st.info,
+               "warning": st.warning, "danger": st.error}[token]
+    callout(f"**Credit standing: {label}**  \n{_band_summary(brief, band, year)}", icon="🛡️")
+
+    st.subheader(f"Why {label} — the scorecard")
+    _render_scorecard_tiles(brief, year)
+    st.caption(_rule_line(band))
+
+    with st.expander("🔍 source"):
         render_source(brief, band.figure_id)
 
 

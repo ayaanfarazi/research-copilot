@@ -69,6 +69,34 @@ def _interest_coverage_source_app() -> None:
     render_source(b, _mid("interest_coverage", b.fiscal_year))
 
 
+def _scorecard_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_scorecard_band
+
+    begin_render_run()
+    render_scorecard_band(_assemble("MSFT", use_cache=True))
+
+
+def _scorecard_withheld_app() -> None:
+    # Synthetic degraded case: mutate the cached band to a withheld state (as the
+    # pipeline does for financial issuers) — pure rendering, still zero API.
+    from src.brief import assemble_brief as _assemble
+    from src.data.models import make_figure_id as _mid
+    from src.ui.render import begin_render_run, render_scorecard_band
+
+    begin_render_run()
+    b = _assemble("MSFT", use_cache=True)
+    band = b.fin.figures.get(_mid("credit_band", b.fiscal_year))
+    band.value = None
+    band.status = "not_found"
+    band.label = "not_applicable_financial"
+    band.notes = [
+        "credit scorecard not applicable to financial issuers "
+        "(SIC 6020: State commercial banks); industrial leverage/coverage framing does not fit"
+    ]
+    render_scorecard_band(b)
+
+
 def _run_formatter_unit_checks() -> bool:
     """Pure-Python checks on the formatters (no Streamlit, no API)."""
     cases = [
@@ -99,7 +127,10 @@ def _run_formatter_unit_checks() -> bool:
 
 def _all_text(at: AppTest) -> str:
     chunks: list[str] = []
-    for kind in ("title", "header", "subheader", "markdown", "caption", "text"):
+    # Includes the semantic callout banners (success/info/warning/error) so the
+    # credit-standing banner text is visible to page-level substring checks.
+    for kind in ("title", "header", "subheader", "markdown", "caption", "text",
+                 "success", "info", "warning", "error"):
         try:
             for el in getattr(at, kind):
                 v = getattr(el, "value", None)
@@ -150,7 +181,7 @@ def main() -> int:
     # Expected values read straight from the cached brief (zero API calls).
     brief = assemble_brief("MSFT", use_cache=True)
     band = brief.fin.figures.get(make_figure_id("credit_band", brief.fiscal_year))
-    expected_band = (band.label or "").upper() if band is not None else ""
+    expected_band = (band.label or "") if band is not None else ""
     syn = brief.synthesis.panel
     expected_verdict = _SYNTHESIS_VERDICT.get(syn.verdict, (syn.verdict.upper(), ""))[0]
     thesis_fragment = (syn.thesis or "")[:40].strip()
@@ -173,7 +204,7 @@ def main() -> int:
     exp_labels = _expander_labels(at)
     subs = _subheaders(at)
     i_syn = _first_idx(subs, "Panel A")
-    i_score = _first_idx(subs, "Credit scorecard")
+    i_score = _first_idx(subs, "the scorecard")  # "Why <band> — the scorecard"
     i_oper = _first_idx(subs, "Operating")
     i_bus = _first_idx(subs, "Business summary")
 
@@ -184,9 +215,10 @@ def main() -> int:
         for e in at.exception:
             print("      ", getattr(e, "value", e))
 
-    band_ok = bool(expected_band) and expected_band in page_text
-    print(f"[2] scorecard band renders         : {'OK' if band_ok else 'FAIL'} "
-          f"(looking for {expected_band!r})")
+    band_banner = f"Credit standing: {expected_band}"
+    band_ok = bool(expected_band) and band_banner in page_text
+    print(f"[2] credit-standing banner renders : {'OK' if band_ok else 'FAIL'} "
+          f"(looking for {band_banner!r})")
 
     exp_ok = len(exp_labels) >= 1
     print(f"[3] expand-to-source present       : {'OK' if exp_ok else 'FAIL'} "
@@ -354,6 +386,74 @@ def main() -> int:
     for e in at_leaf.exception:
         print("      EXC", getattr(e, "value", e))
 
+    # ------------------------- Packet B: credit-standing banner + scorecard tiles
+    print("\n" + "-" * 70)
+    print("PACKET B — credit-standing banner + scorecard-as-tiles")
+    print("-" * 70)
+
+    at_sc = AppTest.from_function(_scorecard_app, default_timeout=60)
+    at_sc.run()
+    sc_md = [m.value for m in at_sc.markdown if isinstance(m.value, str)]
+    sc_cap = [c.value for c in at_sc.caption if isinstance(c.value, str)]
+    sc_success = [s.value for s in at_sc.success]
+    sc_text = _all_text(at_sc)
+    sc_exp = _expander_labels(at_sc)
+    sc_exc_ok = len(at_sc.exception) == 0
+    for e in at_sc.exception:
+        print("      [scorecard] EXC", getattr(e, "value", e))
+
+    # [19] banner renders "Credit standing: strong" with a success (green) treatment.
+    banner_ok = (
+        sc_exc_ok
+        and any("Credit standing: strong" in v for v in sc_success)
+        and len(at_sc.success) == 1
+        and len(at_sc.info) == 0 and len(at_sc.error) == 0 and len(at_sc.warning) == 0
+    )
+    print(f"[19] banner 'Credit standing: strong' (success): {'OK' if banner_ok else 'FAIL'} "
+          f"(success={len(at_sc.success)}, info={len(at_sc.info)})")
+
+    # [20] four dimension tiles render, each with a colored word-tier.
+    joined_md = "\n".join(sc_md)
+    names_ok = all(f":gray[{n}]" in joined_md for n in ("Leverage", "Coverage", "Trajectory", "Liquidity"))
+    tier_word_lines = [v for v in sc_md if v.startswith("### :")]
+    tiles_ok = names_ok and len(tier_word_lines) == 4
+    print(f"[20] four word-tier dimension tiles     : {'OK' if tiles_ok else 'FAIL'} "
+          f"(names={names_ok}, tiers={len(tier_word_lines)})")
+
+    # [21] scorecard text is clean: no severity(0-3), no raw float, no figure_id.
+    sc_no_sev = "severity" not in sc_text
+    sc_no_float = _RAW_FLOAT_RE.search(sc_text) is None
+    sc_no_id = _FIGURE_ID_RE.search(sc_text) is None
+    sc_clean_ok = sc_no_sev and sc_no_float and sc_no_id
+    print(f"[21] tiles clean (no sev/float/fig_id)  : {'OK' if sc_clean_ok else 'FAIL'} "
+          f"(no_severity={sc_no_sev}, no_float={sc_no_float}, no_figure_id={sc_no_id})")
+
+    # [22] the plain-English rule line renders below the tiles.
+    rule_ok = any(v.startswith("Rule:") for v in sc_cap)
+    print(f"[22] rule line renders                  : {'OK' if rule_ok else 'FAIL'}")
+
+    # [23] the band still exposes a working render_source drill-down.
+    source_ok = (
+        any(l.startswith("🔍 source") for l in sc_exp)
+        and any("Computed" in v for v in sc_md)
+    )
+    print(f"[23] band render_source still works     : {'OK' if source_ok else 'FAIL'} "
+          f"(source expander + recipe present)")
+
+    # [24] degraded: a withheld band renders a neutral informational banner
+    #      (st.info), never a colored verdict (no success/warning/error).
+    at_wh = AppTest.from_function(_scorecard_withheld_app, default_timeout=60)
+    at_wh.run()
+    wh_info = [i.value for i in at_wh.info]
+    withheld_ok = (
+        len(at_wh.exception) == 0
+        and len(at_wh.info) >= 1
+        and len(at_wh.success) == 0 and len(at_wh.error) == 0 and len(at_wh.warning) == 0
+        and any("not assessed" in v for v in wh_info)
+    )
+    print(f"[24] withheld band → info, not verdict  : {'OK' if withheld_ok else 'FAIL'} "
+          f"(info={len(at_wh.info)}, success={len(at_wh.success)}, error={len(at_wh.error)})")
+
     print("\n  --- revenue source view (rendered text) ---")
     for line in rev_src.splitlines():
         print("    " + line)
@@ -363,6 +463,16 @@ def main() -> int:
     print("  --- interest_coverage after tracing 'Interest expense' ---")
     for line in leaf_src.splitlines():
         print("    " + line)
+    print("  --- credit-standing banner + scorecard tiles ---")
+    for v in sc_success:
+        print("    [banner] " + v.replace("\n", " ⏎ "))
+    for name, tier in zip([v for v in sc_md if v.startswith(":gray[")], tier_word_lines):
+        print(f"    [tile] {name}  →  {tier}")
+    for v in sc_cap:
+        print("    [caption] " + v)
+    print("  --- withheld band banner ---")
+    for v in wh_info:
+        print("    [info] " + v.replace("\n", " ⏎ "))
 
     ok = (
         exc_ok and band_ok and exp_ok and panelA_ok and claim_src_ok and badge_ok
@@ -370,6 +480,7 @@ def main() -> int:
         and rev_src_ok and cov_src_ok and clean_ok and fmt_ok
         and recipe_form_ok and trace_heading_gone and titles_clean_ok
         and not_interleaved and leaf_ok
+        and banner_ok and tiles_ok and sc_clean_ok and rule_ok and source_ok and withheld_ok
     )
     print("\n" + "=" * 70)
     print("GATE: ALL CHECKS PASSED" if ok else "GATE: FAILED")

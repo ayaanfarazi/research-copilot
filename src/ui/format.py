@@ -157,6 +157,11 @@ _CONCEPT_LABELS = {
     "covenant_leverage": "Covenant leverage screen",
     "covenant_coverage": "Covenant coverage screen",
     "credit_band": "Credit band",
+    # Scorecard dimensions (read plainly inside the band's source drill-down).
+    "score_leverage": "Leverage",
+    "score_coverage": "Coverage",
+    "score_trajectory": "Trajectory",
+    "score_liquidity": "Liquidity",
 }
 
 
