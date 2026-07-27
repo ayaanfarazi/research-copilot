@@ -117,6 +117,30 @@ def _metric_row_app() -> None:
     )
 
 
+def _survival_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_survival_panel
+
+    begin_render_run()
+    render_survival_panel(_assemble("MSFT", use_cache=True))
+
+
+def _covenant_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_covenant_panel
+
+    begin_render_run()
+    render_covenant_panel(_assemble("MSFT", use_cache=True))
+
+
+def _bridge_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_ebitda_bridge
+
+    begin_render_run()
+    render_ebitda_bridge(_assemble("MSFT", use_cache=True))
+
+
 def _run_formatter_unit_checks() -> bool:
     """Pure-Python checks on the formatters (no Streamlit, no API)."""
     cases = [
@@ -537,6 +561,89 @@ def main() -> int:
     print(f"[29] key-metrics default view clean     : {'OK' if km_clean_ok else 'FAIL'} "
           f"(no severity/float/figure_id)")
 
+    # -------- Packet C2: survival + covenant + EBITDA bridge in the row pattern
+    print("\n" + "-" * 70)
+    print("PACKET C2 — survival + covenant + EBITDA bridge as metric rows")
+    print("-" * 70)
+
+    def _section(fn):
+        a = AppTest.from_function(fn, default_timeout=60)
+        a.run()
+        md = [m.value for m in a.markdown if isinstance(m.value, str)]
+        cap = [c.value for c in a.caption if isinstance(c.value, str)]
+        pills = sum(1 for b in a.button if b.label == "🔍 source")
+        return a, md, cap, pills
+
+    at_sv, sv_md, sv_cap, sv_pills = _section(_survival_app)
+    at_cv, cv_md, cv_cap, cv_pills = _section(_covenant_app)
+    at_br, br_md, br_cap, br_pills = _section(_bridge_app)
+
+    # [30] survival rows: word-tiers + a source pill each, no raw float / figure_id.
+    sv_text = _all_text(at_sv)
+    sv_tiers = all(w in "\n".join(sv_md) for w in ("Worsening", "Strengthening", "Comfortable"))
+    sv_ok = (
+        len(at_sv.exception) == 0 and sv_tiers and sv_pills >= 3
+        and _RAW_FLOAT_RE.search(sv_text) is None and _FIGURE_ID_RE.search(sv_text) is None
+    )
+    print(f"[30] survival rows: word-tiers + pills  : {'OK' if sv_ok else 'FAIL'} "
+          f"(tiers={sv_tiers}, pills={sv_pills})")
+
+    # [31] covenant rows: the illustrative / not-real-covenants label + rows + pills.
+    cov_label = any("illustrative" in c and "not real covenants" in c for c in cv_cap)
+    cv_ok = len(at_cv.exception) == 0 and cov_label and cv_pills >= 2 and "within band" in "\n".join(cv_md)
+    print(f"[31] covenant rows + illustrative label : {'OK' if cv_ok else 'FAIL'} "
+          f"(label={cov_label}, pills={cv_pills})")
+
+    # [32] EBITDA-bridge titles/labels clean: no snake_case token, no leading "+ ".
+    br_all = "\n".join(br_md + [b.label for b in at_br.button] + [e.label or "" for e in at_br.expander])
+    bridge_labels_clean = (
+        "amortization_intangibles" not in br_all
+        and "+ " not in br_all
+        and "Amortization of intangibles" in "\n".join(br_md)
+        and all(b.label == "🔍 source" for b in at_br.button)
+    )
+    print(f"[32] EBITDA-bridge titles are plain     : {'OK' if bridge_labels_clean else 'FAIL'}")
+
+    # [33] each restyled section's source pill reaches provenance; the bridge's fact
+    #      row reaches a real SEC.gov link directly.
+    for b in at_br.button:
+        if b.label == "🔍 source":
+            b.click().run()
+            break
+    br_drill = _all_text(at_br)
+    bridge_sec_ok = len(at_br.exception) == 0 and "sec.gov/Archives/edgar" in br_drill
+    # survival + covenant pills open the shared source body (recipe/fact content).
+    for b in at_sv.button:
+        if b.label == "🔍 source":
+            b.click().run()
+            break
+    sv_drill = _all_text(at_sv)
+    for b in at_cv.button:
+        if b.label == "🔍 source":
+            b.click().run()
+            break
+    cv_drill = _all_text(at_cv)
+    drill_open = (
+        len(at_sv.exception) == 0 and len(at_cv.exception) == 0
+        and any(k in sv_drill for k in ("Computed", "Reported value", "XBRL tag"))
+        and any(k in cv_drill for k in ("Computed", "Reported value", "XBRL tag"))
+    )
+    pill_ok = bridge_sec_ok and drill_open
+    print(f"[33] source pills reach provenance/SEC  : {'OK' if pill_ok else 'FAIL'} "
+          f"(bridge_sec={bridge_sec_ok}, surv/cov drill={drill_open})")
+
+    print("\n  --- survival rows ---")
+    for lbl, val in zip(sv_md[0::2], sv_md[1::2]):
+        print(f"    {lbl.strip('*'):26} {val}")
+    print("  --- covenant rows ---")
+    for c in cv_cap:
+        print("    [caption] " + c)
+    for lbl, val in zip(cv_md[0::2], cv_md[1::2]):
+        print(f"    {lbl.strip('*'):26} {val}")
+    print("  --- EBITDA bridge rows ---")
+    for lbl, val in zip(br_md[0::2], br_md[1::2]):
+        print(f"    {lbl.strip('*'):30} {val}")
+
     print("\n  --- revenue source view (rendered text) ---")
     for line in rev_src.splitlines():
         print("    " + line)
@@ -574,6 +681,7 @@ def main() -> int:
         and not_interleaved and leaf_ok
         and banner_ok and tiles_ok and sc_clean_ok and rule_ok and source_ok and withheld_ok
         and header_ok and rows_ok and row_drill_ok and mw_ok and km_clean_ok
+        and sv_ok and cv_ok and bridge_labels_clean and pill_ok
     )
     print("\n" + "=" * 70)
     print("GATE: ALL CHECKS PASSED" if ok else "GATE: FAILED")

@@ -61,21 +61,14 @@ _BAND_TOKEN = {
     "distressed": "danger",
 }
 
-# Covenant screen flag -> color.
-_FLAG_COLOR = {"green": "green", "amber": "orange", "red": "red", "unknown": "gray"}
-
 
 # ---------------------------------------------------------------------------
 # Value formatting
 #
-# The canonical formatters now live in src.ui.format (pure, unit-tested). These
-# thin aliases keep the historical call sites (_headline, the EBITDA bridge)
-# working while guaranteeing every printed number is rounded and unit-aware.
+# The canonical formatters now live in src.ui.format (pure, unit-tested). This
+# thin alias keeps the historical call site (_headline) working while guaranteeing
+# every printed number is rounded and unit-aware.
 # ---------------------------------------------------------------------------
-
-def format_usd(v: float | None) -> str:
-    return fmt_money(v)
-
 
 def format_value(fig: object) -> str:
     """Human value for a figure, unit- and status-aware (delegates to fmt_value)."""
@@ -688,20 +681,68 @@ def _value_markdown(fig: object) -> str:
     return f"**{val}**"
 
 
-def render_metric_row(
-    brief: Brief, concept: str, year: int, label: str, descriptor: str
+# Categorical survival tiers -> semantic token (colored by meaning, not severity #).
+_TIER_TOKEN = {
+    "improving": "success", "strengthening": "success", "comfortable": "success",
+    "flat": "neutral", "stable": "neutral", "adequate": "neutral",
+    "worsening": "warning", "weakening": "warning", "tight": "warning",
+    "acute": "danger", "critical": "danger",
+}
+
+# Covenant screen flag -> token + plain-English pass/watch/breach word.
+_FLAG_TOKEN = {"green": "success", "amber": "warning", "red": "danger", "unknown": "neutral"}
+_FLAG_WORD = {
+    "green": "within band", "amber": "near band", "red": "outside band", "unknown": "no band",
+}
+
+
+def _tier_value_markdown(fig: object) -> str:
+    """Right-hand value for a categorical survival metric: the plain tier word,
+    coloured by meaning, with the supporting figure as muted secondary text."""
+    if fig is None:
+        return ":red[not found — see filing]"
+    label = getattr(fig, "label", None)
+    if not label:
+        return _value_markdown(fig)
+    color = _TOKEN_COLOR[_TIER_TOKEN.get(label, "neutral")]
+    parts = [f":{color}[**{_cap(label)}**]"]
+    if getattr(fig, "value", None) is not None:
+        parts.append(f":gray[{fmt_value(fig)}]")
+    return "  ".join(parts)
+
+
+def _covenant_value_markdown(fig: object) -> str:
+    """Right-hand value for a covenant screen row: the actual ratio + a green/amber/
+    red status word vs. the illustrative band."""
+    if fig is None:
+        return ":red[not found — see filing]"
+    flag = getattr(fig, "label", None) or "unknown"
+    color = _TOKEN_COLOR[_FLAG_TOKEN.get(flag, "neutral")]
+    return f"**{fmt_value(fig)}**  :{color}[{_FLAG_WORD.get(flag, flag)}]"
+
+
+def _metric_row(
+    brief: Brief,
+    figure_id: str,
+    label: str,
+    descriptor: str = "",
+    value_md: str | None = None,
 ) -> None:
-    """One key-metric row: plain label + one-line descriptor, the formatted value,
-    and a compact "🔍 source" pill that toggles the recipe/chips drill-down inline
-    below the row (calls the shared source body directly — no nested expander)."""
-    figure_id = make_figure_id(concept, year)
+    """The shared row primitive: plain label + optional one-line descriptor, a
+    right-hand value, and a compact "🔍 source" pill that toggles the recipe/chips
+    drill-down inline below the row (the shared source body — no nested expander).
+
+    `value_md` overrides the default status-coloured value (used for categorical
+    tiers and covenant flags); when omitted the figure's fmt_value is shown.
+    """
     fig = brief.fin.figures.get(figure_id)
     state_key = f"rowsrc::{figure_id}"
 
     lc, vc, pc = st.columns([6, 2, 1])
     lc.markdown(f"**{label}**")
-    lc.caption(descriptor)
-    vc.markdown(_value_markdown(fig))
+    if descriptor:
+        lc.caption(descriptor)
+    vc.markdown(value_md if value_md is not None else _value_markdown(fig))
 
     opened = bool(st.session_state.get(state_key, False))
     if pc.button("🔍 source", key=_stable_key(f"btn::{state_key}")):
@@ -713,6 +754,14 @@ def render_metric_row(
         render_source(brief, figure_id)
 
     st.divider()  # hairline separator between rows
+
+
+def render_metric_row(
+    brief: Brief, concept: str, year: int, label: str, descriptor: str,
+    value_md: str | None = None,
+) -> None:
+    """One key-metric row keyed by concept+year (see _metric_row)."""
+    _metric_row(brief, make_figure_id(concept, year), label, descriptor, value_md)
 
 
 # One-line plain descriptors for the key credit metrics (mockup captions).
@@ -737,12 +786,23 @@ def render_credit_panel(brief: Brief) -> None:
         render_metric_row(brief, concept, year, label, descriptor)
 
 
+# Survival categorical rows: (concept, label, one-line descriptor).
+_SURVIVAL_METRICS = [
+    ("deleveraging_trajectory", "Deleveraging trajectory", "is leverage improving or worsening YoY"),
+    ("coverage_durability", "Coverage durability", "how durable interest coverage looks"),
+    ("liquidity_runway", "Liquidity runway", "how long cash covers near-term needs"),
+]
+
+
 def render_survival_panel(brief: Brief) -> None:
     year = brief.fiscal_year
     st.subheader("Survival")
-    render_figure(brief, "deleveraging_trajectory", year, "Deleveraging trajectory")
-    render_figure(brief, "coverage_durability", year, "Coverage durability")
-    render_figure(brief, "liquidity_runway", year, "Liquidity runway")
+    for concept, label, descriptor in _SURVIVAL_METRICS:
+        fig = brief.fin.figures.get(make_figure_id(concept, year))
+        render_metric_row(
+            brief, concept, year, label, descriptor,
+            value_md=_tier_value_markdown(fig),
+        )
 
     # Maturity wall: a reconciled schedule renders as a figure; the degraded "proxy"
     # state renders as a plain-English amber callout (not "proxy ⚠ check source").
@@ -762,47 +822,54 @@ def render_survival_panel(brief: Brief) -> None:
 
 
 def render_ebitda_bridge(brief: Brief) -> None:
-    """Render the EBITDA reconciliation from the ebitda metric's breakdown rows."""
+    """Render the EBITDA reconciliation as clean rows (operating income → + D&A →
+    = EBITDA). Each row's source pill reads as a plain label, never a snake_case
+    breakdown token."""
     year = brief.fiscal_year
     st.subheader("EBITDA bridge")
     ebitda = brief.fin.figures.get(make_figure_id("ebitda", year))
     if ebitda is None or not getattr(ebitda, "breakdown", None):
         # No breakdown to walk — still show the figure (or its not-found reason).
-        render_figure(brief, "ebitda", year, "EBITDA")
+        render_metric_row(brief, "ebitda", year, "EBITDA", "operating income + D&A")
         if ebitda is not None and not ebitda.breakdown:
             st.caption("No reconciliation rows available for this year.")
         return
 
-    st.markdown(f"**EBITDA (FY{year}):** {format_value(ebitda)}  {_TIER_BADGE.get(ebitda.confidence) or ''}")
-    st.caption("Operating income → + D&A → = EBITDA. Each row expands to its source figure.")
+    st.caption("Operating income + depreciation + amortization = EBITDA.")
     for row in ebitda.breakdown:
-        rv = "—" if row.value is None else format_usd(row.value)
-        st.markdown(f"**{row.label}:** {rv}")
+        value_md = f"**{fmt_money(row.value)}**"
         if row.figure_id:
-            with st.expander(f"🔍 source — {row.label}"):
-                render_source(brief, row.figure_id)
+            # Component fact/metric row: label plainly via label_for (never "+ foo").
+            concept = row.figure_id.split(":")[0]
+            _metric_row(brief, row.figure_id, label_for(concept), value_md=value_md)
+        else:
+            # The "= EBITDA" total row is the ebitda metric itself; source -> its recipe.
+            _metric_row(
+                brief, ebitda.figure_id, "EBITDA",
+                "operating income + depreciation + amortization", value_md=value_md,
+            )
 
-    with st.expander("🔍 source — EBITDA metric"):
-        render_source(brief, ebitda.figure_id)
+
+# Covenant screen rows: (concept, label, descriptor).
+_COVENANT_METRICS = [
+    ("covenant_leverage", "Leverage screen", "vs. illustrative 4× / 6× bands"),
+    ("covenant_coverage", "Coverage screen", "vs. illustrative 2× / 3× floor"),
+]
 
 
 def render_covenant_panel(brief: Brief) -> None:
     year = brief.fiscal_year
     st.subheader("Covenant screen")
-    st.caption("Illustrative screening bands, **not** real covenants (real covenants live in the credit agreement).")
-    for concept, label in (
-        ("covenant_leverage", "Leverage vs illustrative 4x / 6x bands"),
-        ("covenant_coverage", "Coverage vs illustrative 2x / 3x floor"),
-    ):
+    st.caption(
+        "These are illustrative screening bands, not real covenants — real covenants "
+        "live in the credit agreement, not the 10-K."
+    )
+    for concept, label, descriptor in _COVENANT_METRICS:
         fig = brief.fin.figures.get(make_figure_id(concept, year))
-        flag = getattr(fig, "label", None) if fig is not None else None
-        color = _FLAG_COLOR.get(flag, "gray")
-        actual = format_value(fig) if fig is not None else "—"
-        flag_txt = (flag or "unknown").upper()
-        st.markdown(f"**{label}:** {actual} → :{color}[**{flag_txt}**]")
-        if fig is not None:
-            with st.expander(f"🔍 source — {label_for(concept)}"):
-                render_source(brief, fig.figure_id)
+        render_metric_row(
+            brief, concept, year, label, descriptor,
+            value_md=_covenant_value_markdown(fig),
+        )
 
 
 def render_operating_panel(brief: Brief) -> None:
