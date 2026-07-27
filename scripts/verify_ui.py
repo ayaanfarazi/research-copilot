@@ -97,6 +97,26 @@ def _scorecard_withheld_app() -> None:
     render_scorecard_band(b)
 
 
+def _key_metrics_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_credit_panel
+
+    begin_render_run()
+    render_credit_panel(_assemble("MSFT", use_cache=True))
+
+
+def _metric_row_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_metric_row
+
+    begin_render_run()
+    b = _assemble("MSFT", use_cache=True)
+    render_metric_row(
+        b, "interest_coverage", b.fiscal_year, "Interest coverage",
+        "how many times earnings cover the interest bill",
+    )
+
+
 def _run_formatter_unit_checks() -> bool:
     """Pure-Python checks on the formatters (no Streamlit, no API)."""
     cases = [
@@ -202,6 +222,8 @@ def main() -> int:
 
     page_text = _all_text(at)
     exp_labels = _expander_labels(at)
+    credit_warnings = [w.value for w in at.warning]  # Credit-view amber callouts
+    credit_pills = sum(1 for b in at.button if b.label == "🔍 source")
     subs = _subheaders(at)
     i_syn = _first_idx(subs, "Panel A")
     i_score = _first_idx(subs, "the scorecard")  # "Why <band> — the scorecard"
@@ -454,6 +476,67 @@ def main() -> int:
     print(f"[24] withheld band → info, not verdict  : {'OK' if withheld_ok else 'FAIL'} "
           f"(info={len(at_wh.info)}, success={len(at_wh.success)}, error={len(at_wh.error)})")
 
+    # ---------------- Packet C: page header + metric-row component + key metrics
+    print("\n" + "-" * 70)
+    print("PACKET C — page header + metric-row component + Key credit metrics")
+    print("-" * 70)
+
+    # [25] header: title-cased entity name + the muted provenance subline.
+    header_ok = (
+        "Microsoft Corporation" in page_text
+        and "MSFT · fiscal year 2024 · figures from SEC filings" in page_text
+    )
+    print(f"[25] header name + subline render       : {'OK' if header_ok else 'FAIL'}")
+
+    # [26] key-metric rows: header + one "🔍 source" pill per row + formatted values.
+    rows_ok = (
+        "Key credit metrics" in page_text
+        and credit_pills >= 9
+        and "44.1×" in page_text and "Net cash" in page_text and "$75.5B" in page_text
+    )
+    print(f"[26] key-metric rows + source pills     : {'OK' if rows_ok else 'FAIL'} "
+          f"({credit_pills} pills)")
+
+    # [27] toggling a row's source pill reveals a drill-down reaching a SEC link.
+    at_row = AppTest.from_function(_metric_row_app, default_timeout=60)
+    at_row.run()
+    for b in at_row.button:
+        if b.label == "🔍 source":
+            b.click().run()
+            break
+    for b in at_row.button:  # after the pill opens, the recipe chips appear
+        if b.label.startswith("Interest expense"):
+            b.click().run()
+            break
+    row_src = _all_text(at_row)
+    row_drill_ok = (
+        len(at_row.exception) == 0
+        and "InterestExpense" in row_src
+        and "sec.gov/Archives/edgar" in row_src
+    )
+    print(f"[27] pill → inline drill-down → SEC link : {'OK' if row_drill_ok else 'FAIL'} "
+          f"({len(at_row.exception)} exceptions)")
+    for e in at_row.exception:
+        print("      EXC", getattr(e, "value", e))
+
+    # [28] the maturity-wall degraded state renders as the amber honest box.
+    mw_ok = any("Maturity wall — limited detail" in v for v in credit_warnings)
+    print(f"[28] maturity-wall honest box (amber)   : {'OK' if mw_ok else 'FAIL'} "
+          f"({len(credit_warnings)} warnings)")
+
+    # [29] the key-metrics block default view is clean (no fig_id/severity/float).
+    at_km = AppTest.from_function(_key_metrics_app, default_timeout=60)
+    at_km.run()
+    km_text = _all_text(at_km)
+    km_clean_ok = (
+        len(at_km.exception) == 0
+        and "severity" not in km_text
+        and _RAW_FLOAT_RE.search(km_text) is None
+        and _FIGURE_ID_RE.search(km_text) is None
+    )
+    print(f"[29] key-metrics default view clean     : {'OK' if km_clean_ok else 'FAIL'} "
+          f"(no severity/float/figure_id)")
+
     print("\n  --- revenue source view (rendered text) ---")
     for line in rev_src.splitlines():
         print("    " + line)
@@ -473,6 +556,15 @@ def main() -> int:
     print("  --- withheld band banner ---")
     for v in wh_info:
         print("    [info] " + v.replace("\n", " ⏎ "))
+    print("  --- key-metrics rows (label · descriptor · value) ---")
+    km_md = [m.value for m in at_km.markdown if isinstance(m.value, str)]
+    km_cap = [c.value for c in at_km.caption if isinstance(c.value, str)]
+    # Each row emits markdown [label, value] in order; captions are the descriptors.
+    for lbl, val, desc in zip(km_md[0::2], km_md[1::2], km_cap):
+        print(f"    {lbl.strip('*'):24} {desc:52} {val}")
+    print("  --- maturity-wall honest box ---")
+    for v in credit_warnings:
+        print("    [warning] " + v.replace("\n", " "))
 
     ok = (
         exc_ok and band_ok and exp_ok and panelA_ok and claim_src_ok and badge_ok
@@ -481,6 +573,7 @@ def main() -> int:
         and recipe_form_ok and trace_heading_gone and titles_clean_ok
         and not_interleaved and leaf_ok
         and banner_ok and tiles_ok and sc_clean_ok and rule_ok and source_ok and withheld_ok
+        and header_ok and rows_ok and row_drill_ok and mw_ok and km_clean_ok
     )
     print("\n" + "=" * 70)
     print("GATE: ALL CHECKS PASSED" if ok else "GATE: FAILED")

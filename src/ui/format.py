@@ -13,6 +13,7 @@ small and pure (no Streamlit, no I/O) so they can be unit-tested directly:
   confidence_phrase-> plain words for a ConfidenceTier
   fmt_date         -> "Jun 30, 2024"
   sec_filing_url   -> a real EDGAR filing-index URL (or None if unresolvable)
+  titlecase_entity -> "MICROSOFT CORPORATION" -> "Microsoft Corporation" (acronyms kept)
 
 Money scale note: values are shown in whole millions until they reach $10B, then in
 billions to one decimal. That keeps interest expense ($2,935M) readable while large
@@ -212,6 +213,29 @@ def fmt_date(d: date | None) -> str:
     if d is None:
         return "—"
     return f"{d:%b} {d.day}, {d.year}"
+
+
+def titlecase_entity(name: str | None) -> str:
+    """Light title-casing for an all-caps SEC entity name.
+
+    "MICROSOFT CORPORATION" -> "Microsoft Corporation". Leaves short all-caps
+    acronyms/tickers alone (IBM, AT&T), tokens with digits (3M), and words that
+    already carry intentional casing (eBay, iPhone).
+    """
+    if not name:
+        return name or ""
+    out: list[str] = []
+    for w in name.split():
+        alpha = [c for c in w if c.isalpha()]
+        if not (w.isupper() or w.islower()):
+            out.append(w)                       # intentional casing (eBay)
+        elif any(c.isdigit() for c in w):
+            out.append(w)                       # 3M, 7-Eleven
+        elif w.isupper() and len(alpha) <= 3:
+            out.append(w)                       # acronym/ticker (IBM, AT&T)
+        else:
+            out.append(w[:1].upper() + w[1:].lower())
+    return " ".join(out)
 
 
 def sec_filing_url(cik: object, accession: str | None) -> str | None:

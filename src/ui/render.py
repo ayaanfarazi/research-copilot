@@ -31,6 +31,7 @@ from src.ui.format import (
     fmt_value,
     label_for,
     sec_filing_url,
+    titlecase_entity,
 )
 
 # ---------------------------------------------------------------------------
@@ -423,16 +424,18 @@ def _render_technical_details(fig: object, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def render_header(brief: Brief) -> None:
-    """Title + issuer identity. The scorecard band is its own orderable section
-    (render_scorecard_band) so the view toggle can place it per view."""
-    fin = brief.fin
-    st.title(f"{fin.entity_name} ({brief.ticker})")
+    """Page hero: title-cased entity name + a muted provenance subline.
 
-    c1, c2 = st.columns([1, 3])
-    c1.metric("Anchor fiscal year", f"FY{brief.fiscal_year}")
-    c2.markdown(
-        f"**SIC {fin.sic or '—'}**  \n{fin.sic_description or 'industry n/a'}"
+    The scorecard band is its own orderable section (render_scorecard_band) so the
+    view toggle can place it per view.
+    """
+    fin = brief.fin
+    st.title(titlecase_entity(fin.entity_name))
+    st.caption(
+        f"{brief.ticker} · fiscal year {brief.fiscal_year} · figures from SEC filings"
     )
+    if fin.sic:
+        st.caption(f":gray[SIC {fin.sic} · {fin.sic_description or 'industry n/a'}]")
 
 
 # The four scorecard dimensions, in the order the mockup shows them.
@@ -664,18 +667,74 @@ def render_scorecard_band(brief: Brief) -> None:
 # Deterministic panels
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Reusable metric row — label + descriptor on the left, value + source pill on
+# the right, and an inline drill-down that toggles directly below the row (the
+# same shared provenance body, never wrapped in a second expander).
+# ---------------------------------------------------------------------------
+
+def _value_markdown(fig: object) -> str:
+    """The row's right-hand value, bolded and status-coloured where meaningful."""
+    if fig is None:
+        return ":red[not found — see filing]"
+    val = fmt_value(fig)
+    status = getattr(fig, "status", None)
+    if status == "net_cash":
+        return f":green[**{val}**]"
+    if status == "not_found" or val.startswith("not found"):
+        return f":red[{val}]"
+    if status in ("not_meaningful", "anomaly"):
+        return f":orange[**{val}**]"
+    return f"**{val}**"
+
+
+def render_metric_row(
+    brief: Brief, concept: str, year: int, label: str, descriptor: str
+) -> None:
+    """One key-metric row: plain label + one-line descriptor, the formatted value,
+    and a compact "🔍 source" pill that toggles the recipe/chips drill-down inline
+    below the row (calls the shared source body directly — no nested expander)."""
+    figure_id = make_figure_id(concept, year)
+    fig = brief.fin.figures.get(figure_id)
+    state_key = f"rowsrc::{figure_id}"
+
+    lc, vc, pc = st.columns([6, 2, 1])
+    lc.markdown(f"**{label}**")
+    lc.caption(descriptor)
+    vc.markdown(_value_markdown(fig))
+
+    opened = bool(st.session_state.get(state_key, False))
+    if pc.button("🔍 source", key=_stable_key(f"btn::{state_key}")):
+        opened = not opened
+        st.session_state[state_key] = opened
+
+    if opened:
+        # Inline, full-width provenance body (recipe + chips), same as everywhere else.
+        render_source(brief, figure_id)
+
+    st.divider()  # hairline separator between rows
+
+
+# One-line plain descriptors for the key credit metrics (mockup captions).
+_KEY_CREDIT_METRICS = [
+    ("net_leverage", "Net leverage", "how many years of earnings the net debt equals"),
+    ("total_leverage", "Total leverage", "how many years of earnings the total debt equals"),
+    ("interest_coverage", "Interest coverage", "how many times earnings cover the interest bill"),
+    ("cash_interest_coverage", "Cash interest coverage", "how many times cash earnings cover cash interest"),
+    ("fcf", "Free cash flow", "cash left after capital spending"),
+    ("fcf_to_debt", "FCF / total debt", "free cash flow as a share of total debt"),
+    ("liquidity", "Liquidity", "cash plus short-term investments"),
+    ("total_debt", "Total debt", "all borrowings on the balance sheet"),
+    ("net_debt", "Net debt", "debt minus cash and short-term investments"),
+]
+
+
 def render_credit_panel(brief: Brief) -> None:
+    """The 'Key credit metrics' block — each metric as a row with an inline source."""
     year = brief.fiscal_year
-    st.subheader("Credit & capital structure")
-    render_figure(brief, "total_debt", year, "Total debt")
-    render_figure(brief, "net_debt", year, "Net debt")
-    render_figure(brief, "total_leverage", year, "Total leverage")
-    render_figure(brief, "net_leverage", year, "Net leverage")
-    render_figure(brief, "interest_coverage", year, "Interest coverage")
-    render_figure(brief, "cash_interest_coverage", year, "Cash interest coverage")
-    render_figure(brief, "fcf", year, "Free cash flow (OCF − capex)")
-    render_figure(brief, "fcf_to_debt", year, "FCF / total debt")
-    render_figure(brief, "liquidity", year, "Liquidity (cash + ST investments)")
+    st.subheader("Key credit metrics")
+    for concept, label, descriptor in _KEY_CREDIT_METRICS:
+        render_metric_row(brief, concept, year, label, descriptor)
 
 
 def render_survival_panel(brief: Brief) -> None:
@@ -685,16 +744,21 @@ def render_survival_panel(brief: Brief) -> None:
     render_figure(brief, "coverage_durability", year, "Coverage durability")
     render_figure(brief, "liquidity_runway", year, "Liquidity runway")
 
-    # Maturity wall: reconciled schedule if present, else explicit proxy degradation.
+    # Maturity wall: a reconciled schedule renders as a figure; the degraded "proxy"
+    # state renders as a plain-English amber callout (not "proxy ⚠ check source").
     wall = brief.fin.figures.get(make_figure_id("maturity_wall", year))
-    render_figure(brief, "maturity_wall", year, "Maturity wall")
     if wall is not None and wall.label == "proxy":
-        st.caption(
-            "⚠ maturity wall degraded to the current-debt proxy — no reconciled "
-            "footnote schedule was parsed for this filing."
+        st.warning(
+            "**Maturity wall — limited detail.** A year-by-year repayment schedule "
+            "couldn't be parsed from this filing's debt footnote, so this shows total "
+            "debt split into due-within-a-year vs. later. To see the exact schedule, "
+            "open the debt footnote in the 10-K.",
+            icon="⚠️",
         )
-    elif wall is not None and wall.label == "schedule":
-        st.caption("✓ maturity wall from a reconciled footnote schedule (see source).")
+    else:
+        render_figure(brief, "maturity_wall", year, "Maturity wall")
+        if wall is not None and wall.label == "schedule":
+            st.caption("✓ maturity wall from a reconciled footnote schedule (see source).")
 
 
 def render_ebitda_bridge(brief: Brief) -> None:

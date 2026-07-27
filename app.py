@@ -135,7 +135,7 @@ for i, key in enumerate(VIEW_ORDER[view]):
 
 st.divider()
 st.caption(
-    "Every value — AI claim or computed number — expands to the same source: XBRL "
-    "tag / period / accession for facts; formula / components / reconciliation for "
-    "computed metrics."
+    "Every number on this page carries its own source trail: computed figures show "
+    "the plain-English recipe, and each input opens to the exact filing, period, and "
+    "XBRL tag — with a link to the filing on SEC.gov."
 )
