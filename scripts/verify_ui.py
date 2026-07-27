@@ -26,13 +26,75 @@ import sys
 
 sys.path.insert(0, ".")
 
+import re
+
 from streamlit.testing.v1 import AppTest
 
 from src.brief import assemble_brief
 from src.data.models import make_figure_id
+from src.ui.format import fmt_money, fmt_multiple, sec_filing_url
 from src.ui.render import _SYNTHESIS_VERDICT
 
 _HONEST_BADGE_SUBSTR = "did not fully validate this run"
+
+# A raw un-rounded float (>= 6 fractional digits) and a bare figure_id must never
+# reach the default source view — both live only behind the technical-details toggle.
+_RAW_FLOAT_RE = re.compile(r"\d+\.\d{6,}")
+_FIGURE_ID_RE = re.compile(r"[a-z_]+:FY\d{4}")
+
+_REVENUE_TAG = "RevenueFromContractWithCustomerExcludingAssessedTax"
+
+
+# --- Isolated source-view harnesses -----------------------------------------
+# render_source is exercised on its OWN so the assertions read only the provenance
+# body (not the surrounding page or LLM-panel prose, which is a later packet).
+
+def _revenue_source_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.data.models import make_figure_id as _mid
+    from src.ui.render import begin_render_run, render_source
+
+    begin_render_run()
+    b = _assemble("MSFT", use_cache=True)
+    render_source(b, _mid("revenue", b.fiscal_year))
+
+
+def _interest_coverage_source_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.data.models import make_figure_id as _mid
+    from src.ui.render import begin_render_run, render_source
+
+    begin_render_run()
+    b = _assemble("MSFT", use_cache=True)
+    render_source(b, _mid("interest_coverage", b.fiscal_year))
+
+
+def _run_formatter_unit_checks() -> bool:
+    """Pure-Python checks on the formatters (no Streamlit, no API)."""
+    cases = [
+        ("fmt_multiple(44.0998)", fmt_multiple(44.0998), "44.1×"),
+        ("fmt_money(2_935_000_000)", fmt_money(2_935_000_000), "$2,935M"),
+        ("fmt_money(129_433_000_000)", fmt_money(129_433_000_000), "$129.4B"),
+        ("fmt_money(-2_935_000_000)", fmt_money(-2_935_000_000), "-$2,935M"),
+        ("fmt_money(None)", fmt_money(None), "not found"),
+        (
+            'sec_filing_url("0000789019","0000950170-24-087843")',
+            sec_filing_url("0000789019", "0000950170-24-087843"),
+            "https://www.sec.gov/Archives/edgar/data/789019/"
+            "000095017024087843/0000950170-24-087843-index.htm",
+        ),
+        ("sec_filing_url(None, acc)", sec_filing_url(None, "0000950170-24-087843"), None),
+        ("sec_filing_url(cik, None)", sec_filing_url("0000789019", None), None),
+    ]
+    all_ok = True
+    for name, got, want in cases:
+        ok = got == want
+        all_ok = all_ok and ok
+        line = f"    {'OK  ' if ok else 'FAIL'} {name} -> {got!r}"
+        if not ok:
+            line += f"   (want {want!r})"
+        print(line)
+    return all_ok
 
 
 def _all_text(at: AppTest) -> str:
@@ -181,9 +243,69 @@ def main() -> int:
     print("  --- section order (Investor) ---")
     print("    " + " → ".join(isubs))
 
+    # ---------------------------------------------- Packet A: source drill-down
+    # Render the two source views in isolation and assert on the provenance body.
+    print("\n" + "-" * 70)
+    print("PACKET A — provenance-first source drill-down + formatting")
+    print("-" * 70)
+
+    at_rev = AppTest.from_function(_revenue_source_app, default_timeout=60)
+    at_rev.run()
+    rev_src = _all_text(at_rev)
+    at_cov = AppTest.from_function(_interest_coverage_source_app, default_timeout=60)
+    at_cov.run()
+    cov_src = _all_text(at_cov)
+
+    rev_exc_ok = len(at_rev.exception) == 0
+    cov_exc_ok = len(at_cov.exception) == 0
+    for label, atx in (("revenue", at_rev), ("interest_coverage", at_cov)):
+        for e in atx.exception:
+            print(f"      [{label}] EXC", getattr(e, "value", e))
+
+    # [10] revenue fact source: XBRL tag + a real SEC EDGAR filing URL.
+    rev_url_ok = "sec.gov/Archives/edgar" in rev_src
+    rev_tag_ok = _REVENUE_TAG in rev_src
+    rev_src_ok = rev_exc_ok and rev_tag_ok and rev_url_ok
+    print(f"\n[10] revenue source: XBRL tag + SEC URL : {'OK' if rev_src_ok else 'FAIL'} "
+          f"(tag={rev_tag_ok}, sec_url={rev_url_ok})")
+
+    # [11] interest_coverage metric source: recipe with component labels + result.
+    cov_recipe_ok = (
+        "EBITDA" in cov_src and "Interest expense" in cov_src
+        and "÷" in cov_src and "= 44.1×" in cov_src
+    )
+    cov_src_ok = cov_exc_ok and cov_recipe_ok
+    print(f"[11] interest_coverage source: recipe   : {'OK' if cov_src_ok else 'FAIL'} "
+          f"(labels+÷+result={cov_recipe_ok})")
+
+    # [12] no raw 6-decimal float and no literal figure_id in the source text.
+    combined_src = rev_src + "\n" + cov_src
+    no_raw_float = _RAW_FLOAT_RE.search(combined_src) is None
+    no_fig_id = _FIGURE_ID_RE.search(combined_src) is None
+    clean_ok = no_raw_float and no_fig_id
+    print(f"[12] no raw float / no figure_id shown  : {'OK' if clean_ok else 'FAIL'} "
+          f"(no_raw_float={no_raw_float}, no_figure_id={no_fig_id})")
+    if not no_raw_float:
+        print("      raw float:", _RAW_FLOAT_RE.search(combined_src).group(0))
+    if not no_fig_id:
+        print("      figure_id:", _FIGURE_ID_RE.search(combined_src).group(0))
+
+    # [13] pure-Python formatter/link unit checks.
+    print("[13] formatter + SEC-link unit checks   :")
+    fmt_ok = _run_formatter_unit_checks()
+    print(f"      -> {'OK' if fmt_ok else 'FAIL'}")
+
+    print("\n  --- revenue source view (rendered text) ---")
+    for line in rev_src.splitlines():
+        print("    " + line)
+    print("  --- interest_coverage source view (rendered text) ---")
+    for line in cov_src.splitlines():
+        print("    " + line)
+
     ok = (
         exc_ok and band_ok and exp_ok and panelA_ok and claim_src_ok and badge_ok
         and credit_order_ok and inv_exc_ok and investor_order_ok
+        and rev_src_ok and cov_src_ok and clean_ok and fmt_ok
     )
     print("\n" + "=" * 70)
     print("GATE: ALL CHECKS PASSED" if ok else "GATE: FAILED")

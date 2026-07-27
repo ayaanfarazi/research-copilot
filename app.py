@@ -22,6 +22,7 @@ import streamlit as st
 
 from src.brief import assemble_brief, has_cached_brief
 from src.ui.render import (
+    begin_render_run,
     render_addback_panel,
     render_business_summary_panel,
     render_covenant_panel,
@@ -41,6 +42,10 @@ from src.ui.render import (
 DEMO_TICKERS = ["MSFT", "VZ", "MCD", "NVDA", "CRM"]
 
 st.set_page_config(page_title="Credit Brief", layout="wide")
+
+# Reset the drill-down widget-key registry at the very top of every script run so
+# the progressive source-trace buttons get stable keys (see render.begin_render_run).
+begin_render_run()
 
 # --- Sidebar: ticker selector over the five demo companies ------------------
 st.sidebar.title("Credit Brief")

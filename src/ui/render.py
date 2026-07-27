@@ -2,10 +2,13 @@
 Deterministic-layer renderers for the credit brief (Phase 3, Step 2).
 
 The credibility money-shot lives here: `render_figure` shows a value and an
-expand-to-source drill-down exposing full provenance (figure_id, confidence tier
-badge, and — per figure kind — XBRL tag/period/accession or formula/components/
-breakdown/notes). EVERY number the app prints goes through it, so nothing is ever
-an un-sourced float. The same helper will carry LLM claim→source in the next packet.
+expand-to-source drill-down that reads as a provenance story — a raw fact shows its
+reported value, XBRL tag, period, filing and a live SEC.gov link; a computed metric
+shows a plain-English recipe and lets the reader trace each input one level deeper
+until it bottoms out at raw facts. EVERY number the app prints goes through the
+single shared `render_source`, so nothing is ever an un-sourced float, and the same
+helper carries LLM claim→source. figure_ids, raw floats, and enum internals appear
+only behind an off-by-default "technical details" toggle.
 
 This module renders the DETERMINISTIC layer only (Phase 1 figures). The six LLM
 panels on the Brief are intentionally not rendered yet.
@@ -21,6 +24,14 @@ import streamlit as st
 from src.brief import Brief
 from src.data.models import ConfidenceTier, make_figure_id
 from src.llm.schemas.citations import Claim
+from src.ui.format import (
+    confidence_phrase,
+    fmt_date,
+    fmt_money,
+    fmt_value,
+    label_for,
+    sec_filing_url,
+)
 
 # ---------------------------------------------------------------------------
 # Confidence badges (build_plan.md §6 component 3)
@@ -48,33 +59,19 @@ _FLAG_COLOR = {"green": "green", "amber": "orange", "red": "red", "unknown": "gr
 
 # ---------------------------------------------------------------------------
 # Value formatting
+#
+# The canonical formatters now live in src.ui.format (pure, unit-tested). These
+# thin aliases keep the historical call sites (_headline, the EBITDA bridge)
+# working while guaranteeing every printed number is rounded and unit-aware.
 # ---------------------------------------------------------------------------
 
-def format_usd(v: float) -> str:
-    a = abs(v)
-    sign = "-" if v < 0 else ""
-    if a >= 1e9:
-        return f"{sign}${a / 1e9:,.2f}B"
-    if a >= 1e6:
-        return f"{sign}${a / 1e6:,.1f}M"
-    return f"{sign}${a:,.0f}"
+def format_usd(v: float | None) -> str:
+    return fmt_money(v)
 
 
 def format_value(fig: object) -> str:
-    """Human value for a figure, unit-aware. '—' when there is no number."""
-    val = getattr(fig, "value", None)
-    if val is None:
-        return "—"
-    unit = getattr(fig, "unit", None)
-    if unit == "USD":
-        return format_usd(val)
-    if unit == "x":
-        return f"{val:,.2f}x"
-    if unit == "%":
-        return f"{val:,.1f}%"
-    if unit and unit.startswith("severity"):
-        return getattr(fig, "label", None) or f"{val:g}"
-    return f"{val:,.2f}"
+    """Human value for a figure, unit- and status-aware (delegates to fmt_value)."""
+    return fmt_value(fig)
 
 
 def _headline(fig: object) -> str:
@@ -153,71 +150,201 @@ def render_figure_object(brief: Brief, fig: object, display_label: str) -> objec
     return fig
 
 
+# ===========================================================================
+# The single provenance drill-down — provenance as a story a reader can act on
+#
+# One shared helper, called by every rendered number and every AI claim's figure
+# citation, so there is exactly ONE provenance UX to trust and audit. It reads
+# top-to-bottom as: plain value -> plain-English recipe -> trace each input one
+# level deeper -> bottom out at a raw fact with its XBRL tag, period, filing, and
+# a live SEC.gov link. figure_ids, raw floats, and enum internals live ONLY behind
+# an off-by-default "technical details" toggle — never in the default view.
+#
+# Streamlit constraint: st.expander cannot nest. The top-level "source" affordance
+# may be an expander (owned by the caller), but every deeper trace is a
+# session_state-keyed button that toggles an inline, indented (bordered) block.
+# ===========================================================================
+
+# Formula operator -> the glyph a person reads. Operators are matched as
+# whitespace-delimited tokens so hyphens inside concept words are never mistaken
+# for subtraction (e.g. the credit_band formula's "weakest-link").
+_OP_GLYPH = {"/": "÷", "*": "×", "×": "×", "+": "+", "-": "−", "−": "−"}
+
+# Per-run registry so a widget key stays STABLE across reruns (required for a
+# click to re-bind and toggle to work) while still being unique when the same
+# drill-down path is rendered twice in one run (a rendered figure and an AI claim
+# can both cite it). `_begin_run()` clears the registry at the top of each script
+# run; the Nth appearance of a path in a run deterministically gets suffix N, which
+# is identical on the next run, so open/closed state survives reruns.
+_KEY_COUNTS: dict[str, int] = {}
+
+
+def begin_render_run() -> None:
+    """Reset the per-run widget-key registry. Call ONCE at the top of each script run
+    (app.py and any AppTest harness) so drill-down widget keys stay stable."""
+    _KEY_COUNTS.clear()
+
+
+def _stable_key(base: str) -> str:
+    n = _KEY_COUNTS.get(base, 0)
+    _KEY_COUNTS[base] = n + 1
+    return base if n == 0 else f"{base}#{n}"
+
+
+def _toggle(label: str, state_key: str) -> bool:
+    """A button that flips a session_state flag; returns whether it's open.
+
+    The flag key (`state_key`) is stable per drill-down path so the open/closed
+    state persists; the button widget key is disambiguated per run so two renders
+    of the same path in one run don't collide.
+    """
+    widget_key = _stable_key(f"btn::{state_key}")
+    if st.button(label, key=widget_key):
+        st.session_state[state_key] = not st.session_state.get(state_key, False)
+    return bool(st.session_state.get(state_key, False))
+
+
+def _formula_ops(formula: str) -> list[str]:
+    """Operator glyphs in order, from whitespace-delimited operator tokens only."""
+    return [_OP_GLYPH[t] for t in (formula or "").split() if t in _OP_GLYPH]
+
+
+def _recipe_line(brief: Brief, fig: object) -> str:
+    """Plain-English recipe with the actual component values filled in.
+
+    "EBITDA $129.4B ÷ Interest expense $2,935M = 44.1×" when the operators line up
+    with the components; otherwise a readable list of the inputs -> the result.
+    """
+    comps: list[tuple[str, str]] = []
+    for cid in getattr(fig, "component_ids", None) or []:
+        comp = brief.fin.figures.get(cid)
+        concept = cid.split(":")[0]
+        value = fmt_value(comp) if comp is not None else "not found"
+        comps.append((label_for(concept), value))
+
+    result = fmt_value(fig)
+    ops = _formula_ops(getattr(fig, "formula", "") or "")
+
+    if comps and len(ops) == len(comps) - 1:
+        parts: list[str] = []
+        for i, (lbl, val) in enumerate(comps):
+            if i:
+                parts.append(ops[i - 1])
+            parts.append(f"{lbl} {val}")
+        return " ".join(parts) + f" = {result}"
+    if comps:
+        listed = ",  ".join(f"{lbl} {val}" for lbl, val in comps)
+        return f"{listed}  →  {result}"
+    return result
+
+
 def render_source(brief: Brief, figure_id: str) -> None:
     """The single provenance drill-down in the app.
 
-    Given a figure_id, render its full, independently-computed source: XBRL tag /
-    period / accession for a fact; formula / components / reconciliation / notes for
-    a computed metric. A rendered number and an LLM claim's figure-citation open THIS
-    identical body — there is exactly one provenance UX in the app.
+    Given a figure_id, tell its source story: a fact shows its reported value, XBRL
+    tag, period, filing and a SEC.gov link; a computed metric shows a plain-English
+    recipe and lets the reader trace each input one level deeper (progressive
+    disclosure) until it bottoms out at raw facts. A rendered number and an AI
+    claim's figure-citation open THIS identical body.
     """
     fig = brief.fin.figures.get(figure_id)
     if fig is None:
-        st.markdown(f"- **figure_id:** `{figure_id}`")
-        st.markdown("- no independently-computed figure exists for this id")
+        st.markdown("_No independently-computed figure exists for this reference._")
         return
-    _render_provenance(fig)
+    _render_source_body(brief, fig, path=figure_id)
 
 
-def _render_provenance(fig: object) -> None:
-    """Dump every provenance field the figure carries (kind-aware)."""
-    st.markdown(f"- **figure_id:** `{fig.figure_id}`")
-
-    val = getattr(fig, "value", None)
-    unit = getattr(fig, "unit", None) or ""
-    if val is not None:
-        st.markdown(f"- **value:** {val:,} {unit}".rstrip())
-    else:
-        st.markdown("- **value:** (none)")
-
-    conf = getattr(fig, "confidence", None)
-    if conf is not None:
-        st.markdown(f"- **confidence:** {conf.value}")
-
+def _render_source_body(brief: Brief, fig: object, path: str) -> None:
     kind = getattr(fig, "kind", None)
-    if kind == "fact":
-        # ResolvedFact provenance: the exact filing coordinates.
-        for attr, lbl in (
-            ("tag", "XBRL tag"),
-            ("period_start", "period start"),
-            ("period_end", "period end"),
-            ("form", "form"),
-            ("accession", "accession"),
-            ("filed", "filed"),
-        ):
-            v = getattr(fig, attr, None)
-            if v is not None:
-                st.markdown(f"- **{lbl}:** `{v}`")
-    elif kind == "metric":
-        # ComputedMetric provenance: how the number was built.
-        if getattr(fig, "status", None):
-            st.markdown(f"- **status:** {fig.status}")
-        if getattr(fig, "label", None):
-            st.markdown(f"- **label:** {fig.label}")
-        if getattr(fig, "formula", ""):
-            st.markdown(f"- **formula:** `{fig.formula}`")
-        if getattr(fig, "component_ids", None):
-            st.markdown("- **built from:** " + ", ".join(f"`{c}`" for c in fig.component_ids))
-        breakdown = getattr(fig, "breakdown", None) or []
-        if breakdown:
-            st.markdown("- **reconciliation:**")
-            for row in breakdown:
-                rv = "—" if row.value is None else f"{row.value:,.0f}"
-                ref = f"`{row.figure_id}`" if row.figure_id else "—"
-                st.markdown(f"    - {row.label}: {rv}  ({ref})")
+    if kind == "metric":
+        _render_metric_source(brief, fig, path)
+    else:
+        _render_fact_source(brief, fig)
+    _render_technical_details(fig, path)
 
-    for note in getattr(fig, "notes", None) or []:
-        st.markdown(f"- _note:_ {note}")
+
+def _render_fact_source(brief: Brief, fig: object) -> None:
+    """A raw fact: reported value, XBRL tag, human period, filing, confidence, link."""
+    st.markdown(f"**Reported value:** {fmt_value(fig)}")
+
+    tag = getattr(fig, "tag", None)
+    if tag:
+        st.markdown(f"**XBRL tag:** `{tag}`")
+
+    period_end = getattr(fig, "period_end", None)
+    period_start = getattr(fig, "period_start", None)
+    if period_start and period_end:
+        st.markdown(f"**Period:** {fmt_date(period_start)} – {fmt_date(period_end)}")
+    elif period_end:
+        st.markdown(f"**Period:** as of {fmt_date(period_end)}")
+
+    form = getattr(fig, "form", None)
+    filed = getattr(fig, "filed", None)
+    if form or filed:
+        st.markdown(f"**Filing:** {form or '—'}, filed {fmt_date(filed)}")
+
+    phrase = confidence_phrase(getattr(fig, "confidence", None))
+    if phrase:
+        st.markdown(f"**Confidence:** {phrase}")
+
+    url = sec_filing_url(brief.fin.cik, getattr(fig, "accession", None))
+    if url:
+        st.markdown(f"**[↗ Open this filing on SEC.gov]({url})**")
+    else:
+        st.caption(
+            "Filing reference unavailable — no accession on this figure; "
+            "check the issuer's filings directly on SEC.gov EDGAR."
+        )
+
+
+def _render_metric_source(brief: Brief, fig: object, path: str) -> None:
+    """A computed metric: the recipe, then a traceable row per component input."""
+    st.markdown(f"**How it's computed:** {_recipe_line(brief, fig)}")
+
+    components = getattr(fig, "component_ids", None) or []
+    if not components:
+        return
+
+    st.markdown("**Trace each input:**")
+    for cid in components:
+        comp = brief.fin.figures.get(cid)
+        concept = cid.split(":")[0]
+        lbl = label_for(concept)
+        val = fmt_value(comp) if comp is not None else "not found"
+        state_key = f"trace::{path}>{cid}"
+        opened = _toggle(f"↳ trace  {lbl} · {val}", state_key)
+        if opened:
+            with st.container(border=True):
+                if comp is None:
+                    st.markdown(f"_{lbl}: no standalone figure — derived within this metric._")
+                else:
+                    _render_source_body(brief, comp, path=f"{path}>{cid}")
+
+
+def _render_technical_details(fig: object, path: str) -> None:
+    """Off-by-default toggle exposing figure_id, the raw value, and enum internals.
+
+    Kept for debugging/audit; deliberately NOT part of the default provenance view
+    so the reader never sees a figure_id, a raw float, or an enum name unprompted.
+    """
+    if not _toggle("⚙ technical details", f"tech::{path}"):
+        return
+    with st.container(border=True):
+        st.markdown(f"- `figure_id` = `{getattr(fig, 'figure_id', '—')}`")
+        val = getattr(fig, "value", None)
+        unit = getattr(fig, "unit", None) or ""
+        st.markdown(f"- raw `value` = `{val!r}` {unit}".rstrip())
+        conf = getattr(fig, "confidence", None)
+        if conf is not None:
+            st.markdown(f"- `confidence` = `{getattr(conf, 'value', conf)}`")
+        if getattr(fig, "status", None):
+            st.markdown(f"- `status` = `{fig.status}`")
+        if getattr(fig, "formula", ""):
+            st.markdown(f"- `formula` = `{fig.formula}`")
+        if getattr(fig, "component_ids", None):
+            st.markdown("- `component_ids` = " + ", ".join(f"`{c}`" for c in fig.component_ids))
+        for note in getattr(fig, "notes", None) or []:
+            st.markdown(f"- _note:_ {note}")
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +377,7 @@ def render_scorecard_band(brief: Brief) -> None:
     color = _BAND_COLOR.get(label, "gray")
     st.markdown(f"**Credit band (FY{year}):** :{color}[**{label.upper()}**]")
     with st.expander("🔍 how this band was reached"):
-        _render_provenance(band)
+        render_source(brief, band.figure_id)
 
 
 # ---------------------------------------------------------------------------
@@ -309,14 +436,10 @@ def render_ebitda_bridge(brief: Brief) -> None:
         st.markdown(f"**{row.label}:** {rv}")
         if row.figure_id:
             with st.expander(f"🔍 source — {row.label}"):
-                comp = brief.fin.figures.get(row.figure_id)
-                if comp is not None:
-                    _render_provenance(comp)
-                else:
-                    st.markdown(f"- **figure_id:** `{row.figure_id}` (derived total; no standalone figure)")
+                render_source(brief, row.figure_id)
 
     with st.expander("🔍 source — EBITDA metric"):
-        _render_provenance(ebitda)
+        render_source(brief, ebitda.figure_id)
 
 
 def render_covenant_panel(brief: Brief) -> None:
@@ -335,7 +458,7 @@ def render_covenant_panel(brief: Brief) -> None:
         st.markdown(f"**{label}:** {actual} → :{color}[**{flag_txt}**]")
         if fig is not None:
             with st.expander(f"🔍 source — {concept}"):
-                _render_provenance(fig)
+                render_source(brief, fig.figure_id)
 
 
 def render_operating_panel(brief: Brief) -> None:
