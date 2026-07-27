@@ -200,10 +200,12 @@ def main() -> int:
     print(f"[4] Panel A synthesis content      : {'OK' if panelA_ok else 'FAIL'} "
           f"(verdict {expected_verdict!r} + thesis fragment)")
 
-    fig_src = [lbl for lbl in exp_labels if "figure source" in lbl]
+    # Titles are now plain ("🔍 source" / "🔍 source — <label>"), never a raw
+    # figure_id — so count the shared source drill-down affordance by prefix.
+    fig_src = [lbl for lbl in exp_labels if lbl.startswith("🔍 source")]
     claim_src_ok = len(fig_src) >= 1
-    print(f"[5] claim→figure source expander   : {'OK' if claim_src_ok else 'FAIL'} "
-          f"({len(fig_src)} figure-source expanders)")
+    print(f"[5] source drill-down affordance    : {'OK' if claim_src_ok else 'FAIL'} "
+          f"({len(fig_src)} source expanders)")
 
     badge_ok = bool(nonok_panels) and _HONEST_BADGE_SUBSTR in page_text
     print(f"[6] honest badge on non-ok panel   : {'OK' if badge_ok else 'FAIL'} "
@@ -270,8 +272,9 @@ def main() -> int:
           f"(tag={rev_tag_ok}, sec_url={rev_url_ok})")
 
     # [11] interest_coverage metric source: recipe with component labels + result.
+    #      Labels read in-sentence casing ("interest expense", acronym "EBITDA").
     cov_recipe_ok = (
-        "EBITDA" in cov_src and "Interest expense" in cov_src
+        "EBITDA" in cov_src and "interest expense" in cov_src
         and "÷" in cov_src and "= 44.1×" in cov_src
     )
     cov_src_ok = cov_exc_ok and cov_recipe_ok
@@ -295,17 +298,78 @@ def main() -> int:
     fmt_ok = _run_formatter_unit_checks()
     print(f"      -> {'OK' if fmt_ok else 'FAIL'}")
 
+    # -------------------------------- Packet A.1: match the approved mockup look
+    print("\n" + "-" * 70)
+    print("PACKET A.1 — clean recipe sentence, compact chips, plain titles")
+    print("-" * 70)
+
+    # [14] interest_coverage recipe in the parallel "Computed as … = … = 44.1×" form
+    #      (label expression, then value expression, then result — never interleaved).
+    interest_val_ok = "$2,935M" in cov_src or "$2.9B" in cov_src
+    recipe_form_ok = (
+        "Computed as EBITDA ÷ interest expense" in cov_src
+        and "$129.4B ÷ " in cov_src
+        and "= 44.1×" in cov_src
+        and interest_val_ok
+    )
+    print(f"[14] recipe 'Computed as … = … = 44.1×' : {'OK' if recipe_form_ok else 'FAIL'} "
+          f"(129.4B={'$129.4B ÷ ' in cov_src}, interest_val={interest_val_ok})")
+
+    # [15] the old "Trace each input:" heading is gone (isolated view + full page).
+    trace_heading_gone = (
+        "Trace each input:" not in cov_src and "Trace each input:" not in page_text
+    )
+    print(f"[15] 'Trace each input:' heading removed: {'OK' if trace_heading_gone else 'FAIL'}")
+
+    # [16] no rendered expander title exposes a concept:FY20xx figure_id (both views).
+    inv_labels = _expander_labels(at)
+    all_titles = exp_labels + inv_labels
+    title_id_hits = [t for t in all_titles if re.search(r"[a-z_]+:FY20\d\d", t)]
+    titles_clean_ok = not title_id_hits
+    print(f"[16] no figure_id in any source title   : {'OK' if titles_clean_ok else 'FAIL'} "
+          f"({len(all_titles)} titles scanned)")
+    if title_id_hits:
+        print("      offending:", title_id_hits[:3])
+
+    # [17] the ratio recipe is NOT interleaved: values are grouped after the "=",
+    #      so a "label value" adjacency like "EBITDA $129.4B" must not appear in text.
+    not_interleaved = "EBITDA $129.4B" not in cov_src and "interest expense $2" not in cov_src
+    print(f"[17] ratio recipe not interleaved       : {'OK' if not_interleaved else 'FAIL'}")
+
+    # [18] a metric's fact input still traces to the leaf card with a SEC.gov link.
+    at_leaf = AppTest.from_function(_interest_coverage_source_app, default_timeout=60)
+    at_leaf.run()
+    for btn in at_leaf.button:
+        if btn.label.startswith("Interest expense"):
+            btn.click().run()
+            break
+    leaf_src = _all_text(at_leaf)
+    leaf_ok = (
+        len(at_leaf.exception) == 0
+        and "InterestExpense" in leaf_src
+        and "sec.gov/Archives/edgar" in leaf_src
+    )
+    print(f"[18] trace → fact leaf card + SEC link   : {'OK' if leaf_ok else 'FAIL'} "
+          f"({len(at_leaf.exception)} exceptions on drill)")
+    for e in at_leaf.exception:
+        print("      EXC", getattr(e, "value", e))
+
     print("\n  --- revenue source view (rendered text) ---")
     for line in rev_src.splitlines():
         print("    " + line)
     print("  --- interest_coverage source view (rendered text) ---")
     for line in cov_src.splitlines():
         print("    " + line)
+    print("  --- interest_coverage after tracing 'Interest expense' ---")
+    for line in leaf_src.splitlines():
+        print("    " + line)
 
     ok = (
         exc_ok and band_ok and exp_ok and panelA_ok and claim_src_ok and badge_ok
         and credit_order_ok and inv_exc_ok and investor_order_ok
         and rev_src_ok and cov_src_ok and clean_ok and fmt_ok
+        and recipe_form_ok and trace_heading_gone and titles_clean_ok
+        and not_interleaved and leaf_ok
     )
     print("\n" + "=" * 70)
     print("GATE: ALL CHECKS PASSED" if ok else "GATE: FAILED")

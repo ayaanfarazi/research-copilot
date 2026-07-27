@@ -162,7 +162,11 @@ def render_figure_object(brief: Brief, fig: object, display_label: str) -> objec
 #
 # Streamlit constraint: st.expander cannot nest. The top-level "source" affordance
 # may be an expander (owned by the caller), but every deeper trace is a
-# session_state-keyed button that toggles an inline, indented (bordered) block.
+# session_state-keyed chip button that toggles an inline block. A metric input
+# expands to just its own recipe + chips with a light left-border cue (never a heavy
+# box); only a raw-fact leaf gets a bordered card. Chips are laid out horizontally
+# via st.columns placed directly inside a container/expander (never inside another
+# column) so the drill-down can recurse arbitrarily deep without nesting columns.
 # ===========================================================================
 
 # Formula operator -> the glyph a person reads. Operators are matched as
@@ -209,11 +213,38 @@ def _formula_ops(formula: str) -> list[str]:
     return [_OP_GLYPH[t] for t in (formula or "").split() if t in _OP_GLYPH]
 
 
-def _recipe_line(brief: Brief, fig: object) -> str:
-    """Plain-English recipe with the actual component values filled in.
+def _lower_first(label: str) -> str:
+    """Lower-case a label's first letter for mid-sentence use, but keep acronyms
+    (EBITDA, FCF) upper-case. "Interest expense" -> "interest expense"; "EBITDA"
+    stays "EBITDA"; "adjusted EBITDA" stays "adjusted EBITDA"."""
+    if not label:
+        return label
+    head = label.split(" ", 1)[0]
+    if head.isupper():
+        return label
+    return label[:1].lower() + label[1:]
 
-    "EBITDA $129.4B ÷ Interest expense $2,935M = 44.1×" when the operators line up
-    with the components; otherwise a readable list of the inputs -> the result.
+
+def _recipe_ops(fig: object, n_terms: int) -> list[str] | None:
+    """The operator glyphs joining `n_terms` components, or None if they don't align.
+
+    Prefers the breakdown row prefixes (a bridge like EBITDA is all "+"), since a
+    metric's free-text formula can name collapsed terms (e.g. "operating_income + D&A"
+    for three components). Falls back to the formula's own operator tokens.
+    """
+    breakdown = getattr(fig, "breakdown", None) or []
+    comp_rows = [r for r in breakdown if not r.label.strip().startswith("=")]
+    if n_terms >= 2 and len(comp_rows) == n_terms:
+        return [_OP_GLYPH.get(r.label.strip()[:1], "+") for r in comp_rows[1:]]
+    ops = _formula_ops(getattr(fig, "formula", "") or "")
+    return ops if len(ops) == n_terms - 1 else None
+
+
+def _recipe_line(brief: Brief, fig: object) -> str:
+    """One clean sentence: plain-label formula and value formula as TWO parallel
+    expressions, never interleaved per term.
+
+    "Computed as EBITDA ÷ interest expense = $129.4B ÷ $2,935M = 44.1×."
     """
     comps: list[tuple[str, str]] = []
     for cid in getattr(fig, "component_ids", None) or []:
@@ -223,19 +254,23 @@ def _recipe_line(brief: Brief, fig: object) -> str:
         comps.append((label_for(concept), value))
 
     result = fmt_value(fig)
-    ops = _formula_ops(getattr(fig, "formula", "") or "")
+    if not comps:
+        return f"Reported as {result}."
 
-    if comps and len(ops) == len(comps) - 1:
-        parts: list[str] = []
-        for i, (lbl, val) in enumerate(comps):
-            if i:
-                parts.append(ops[i - 1])
-            parts.append(f"{lbl} {val}")
-        return " ".join(parts) + f" = {result}"
-    if comps:
-        listed = ",  ".join(f"{lbl} {val}" for lbl, val in comps)
-        return f"{listed}  →  {result}"
-    return result
+    ops = _recipe_ops(fig, len(comps))
+    if ops is not None:
+        label_expr = _lower_first(comps[0][0])
+        value_expr = comps[0][1]
+        for op, (lbl, val) in zip(ops, comps[1:]):
+            label_expr += f" {op} {_lower_first(lbl)}"
+            value_expr += f" {op} {val}"
+        return f"Computed as {label_expr} = {value_expr} = {result}."
+
+    # No clean operator alignment: parallel lists (still labels-then-values, never
+    # interleaved) so a reader never sees "Net debt Net cash ÷ Adjusted Ebitda".
+    labels = ", ".join(_lower_first(lbl) for lbl, _ in comps)
+    values = ", ".join(val for _, val in comps)
+    return f"Computed from {labels} = {values} = {result}."
 
 
 def render_source(brief: Brief, figure_id: str) -> None:
@@ -251,16 +286,17 @@ def render_source(brief: Brief, figure_id: str) -> None:
     if fig is None:
         st.markdown("_No independently-computed figure exists for this reference._")
         return
-    _render_source_body(brief, fig, path=figure_id)
+    _render_source_body(brief, fig, path=figure_id, depth=0)
 
 
-def _render_source_body(brief: Brief, fig: object, path: str) -> None:
+def _render_source_body(brief: Brief, fig: object, path: str, depth: int = 0) -> None:
     kind = getattr(fig, "kind", None)
     if kind == "metric":
-        _render_metric_source(brief, fig, path)
+        # A metric shows recipe + chips only; its raw internals never surface here.
+        _render_metric_source(brief, fig, path, depth)
     else:
         _render_fact_source(brief, fig)
-    _render_technical_details(fig, path)
+        _render_technical_details(fig, path)
 
 
 def _render_fact_source(brief: Brief, fig: object) -> None:
@@ -297,28 +333,56 @@ def _render_fact_source(brief: Brief, fig: object) -> None:
         )
 
 
-def _render_metric_source(brief: Brief, fig: object, path: str) -> None:
-    """A computed metric: the recipe, then a traceable row per component input."""
-    st.markdown(f"**How it's computed:** {_recipe_line(brief, fig)}")
+def _chip_weights(n: int) -> list[int]:
+    """Column weights for `n` compact, left-aligned trace chips plus a trailing spacer
+    so they stay narrow instead of stretching full width."""
+    return [3] * n + [max(1, 12 - 3 * n)]
+
+
+def _render_metric_source(brief: Brief, fig: object, path: str, depth: int = 0) -> None:
+    """A computed metric: the recipe sentence, then compact horizontal trace chips.
+
+    No "How it's computed" / "Trace each input" headers. A metric input expands to
+    just its own recipe + chips (light left-border cue via a blockquote, no box); a
+    fact input expands to the bordered leaf card.
+    """
+    recipe = _recipe_line(brief, fig)
+    st.markdown(recipe if depth == 0 else f"> {recipe}")
 
     components = getattr(fig, "component_ids", None) or []
     if not components:
         return
 
-    st.markdown("**Trace each input:**")
-    for cid in components:
+    # Horizontal, compact trace chips (one per component input).
+    cols = st.columns(_chip_weights(len(components)))
+    states: list[tuple[str, object, bool]] = []
+    for i, cid in enumerate(components):
         comp = brief.fin.figures.get(cid)
         concept = cid.split(":")[0]
         lbl = label_for(concept)
         val = fmt_value(comp) if comp is not None else "not found"
         state_key = f"trace::{path}>{cid}"
-        opened = _toggle(f"↳ trace  {lbl} · {val}", state_key)
-        if opened:
+        opened = bool(st.session_state.get(state_key, False))
+        chip = f"{lbl} {val}  ▾" if opened else f"{lbl} {val}  ▸ trace"
+        with cols[i]:
+            if st.button(chip, key=_stable_key(f"btn::{state_key}")):
+                opened = not opened
+                st.session_state[state_key] = opened
+        states.append((cid, comp, opened))
+
+    # Expansions render below the chip row (never inside a chip's column), so the
+    # recursion stays a flat sequence of column blocks — no nested columns.
+    for cid, comp, opened in states:
+        if not opened:
+            continue
+        child_path = f"{path}>{cid}"
+        if comp is None:
+            st.markdown("> _derived within this metric — no standalone figure._")
+        elif getattr(comp, "kind", None) == "metric":
+            _render_metric_source(brief, comp, child_path, depth + 1)
+        else:
             with st.container(border=True):
-                if comp is None:
-                    st.markdown(f"_{lbl}: no standalone figure — derived within this metric._")
-                else:
-                    _render_source_body(brief, comp, path=f"{path}>{cid}")
+                _render_source_body(brief, comp, path=child_path, depth=depth + 1)
 
 
 def _render_technical_details(fig: object, path: str) -> None:
@@ -457,7 +521,7 @@ def render_covenant_panel(brief: Brief) -> None:
         flag_txt = (flag or "unknown").upper()
         st.markdown(f"**{label}:** {actual} → :{color}[**{flag_txt}**]")
         if fig is not None:
-            with st.expander(f"🔍 source — {concept}"):
+            with st.expander(f"🔍 source — {label_for(concept)}"):
                 render_source(brief, fig.figure_id)
 
 
@@ -534,7 +598,8 @@ def _render_panel_status(status: str | None) -> None:
 def _render_citation(brief: Brief, citation: object) -> None:
     """Render one citation: a figure opens render_source; a section quotes the filing."""
     if citation.kind == "figure":
-        with st.expander(f"🔍 figure source — `{citation.ref}`"):
+        concept = (citation.ref or "").split(":")[0]
+        with st.expander(f"🔍 source — {label_for(concept)}"):
             render_source(brief, citation.ref)
     else:  # section
         section = _SECTION_LABELS.get(citation.ref, citation.ref)

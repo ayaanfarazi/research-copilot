@@ -124,11 +124,17 @@ _CONCEPT_LABELS = {
     "short_term_investments": "Short-term investments",
     "capex": "Capital expenditure",
     "ocf": "Operating cash flow",
+    "operating_cash_flow": "Operating cash flow",
+    "cogs": "Cost of revenue",
+    "sbc": "Share-based compensation",
     "total_equity": "Total equity",
     "current_debt": "Current debt",
     "debt_total": "Total debt (balance sheet)",
-    # Computed metrics
+    # Computed metrics. Acronyms stay upper-case ("EBITDA", not "Ebitda"); the
+    # "adjusted" qualifier stays lower so it reads naturally mid-sentence.
     "ebitda": "EBITDA",
+    "adjusted_ebitda": "adjusted EBITDA",
+    "adjusted_net_leverage": "Adjusted net leverage",
     "total_debt": "Total debt",
     "net_debt": "Net debt",
     "total_leverage": "Total leverage",
