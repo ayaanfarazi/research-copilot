@@ -271,7 +271,6 @@ def main() -> int:
     i_syn = _first_idx(subs, "Panel A")
     i_score = _first_idx(subs, "the scorecard")  # "Why <band> — the scorecard"
     i_oper = _first_idx(subs, "Operating")
-    i_bus = _first_idx(subs, "Business summary")
 
     exc_ok = len(at.exception) == 0
     print(f"\n[1] no uncaught exception (Credit) : {'OK' if exc_ok else 'FAIL'} "

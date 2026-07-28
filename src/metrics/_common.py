@@ -17,7 +17,7 @@ pure arithmetic over resolved XBRL facts.
 
 from __future__ import annotations
 
-from src.data.models import ComputedMetric, ConfidenceTier, Figure, ResolvedFact, make_figure_id
+from src.data.models import ConfidenceTier, Figure, make_figure_id
 
 # Strength order, strongest first. Used to pick the weakest tier among inputs.
 _TIER_ORDER = [

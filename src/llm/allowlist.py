@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from src.data.models import CompanyFinancials, ComputedMetric, Figure, ResolvedFact
+from src.data.models import CompanyFinancials, ComputedMetric, Figure
 from src.llm.normalize import normalize_numeric_token
 
 _RATIO_UNITS = frozenset({"x"})

@@ -10,7 +10,6 @@ Checks:
 Exit 0 on full success, 1 on any failure.
 """
 import sys
-import json
 
 # Add the project root to the path so imports work from any directory.
 sys.path.insert(0, ".")
@@ -23,7 +22,7 @@ def run(ticker: str) -> bool:
     print("[config] Loading environment variables...")
     try:
         import config
-        print(f"[config] ✓ ANTHROPIC_API_KEY: set")
+        print("[config] ✓ ANTHROPIC_API_KEY: set")
         print(f"[config] ✓ SEC_USER_AGENT: {config.SEC_USER_AGENT}")
     except ValueError as e:
         print(f"[config] ✗ {e}")
@@ -69,7 +68,7 @@ def run(ticker: str) -> bool:
             all_passed = False
 
     # --- Step 4: Anthropic smoke call ---
-    print(f"\n[LLM] Calling Anthropic API...")
+    print("\n[LLM] Calling Anthropic API...")
     try:
         from src.llm.client import smoke_call
         result = smoke_call()

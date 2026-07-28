@@ -142,10 +142,6 @@ def validate_output(
 
     def walk(obj: Any, path: str) -> None:
         if isinstance(obj, str):
-            if path.endswith(".excerpt") and document is not None:
-                ref_path = path.replace(".excerpt", ".ref")
-                # ref lives on sibling field; handled at Citation model level below
-                pass
             violations.extend(_check_numeric_tokens(obj, allowlist, mode, path))
         elif isinstance(obj, BaseModel):
             # Figure citation membership.

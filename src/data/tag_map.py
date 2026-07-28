@@ -29,7 +29,7 @@ tags are ranked above the income-statement depreciation line.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 Sign = Literal["positive", "negative", "any"]

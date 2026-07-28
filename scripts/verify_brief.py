@@ -50,7 +50,7 @@ def _check_brief(brief: Brief) -> bool:
         print(f"  [FAIL] fin.status={brief.fin.status!r} (expected 'ok')")
         ok = False
     else:
-        print(f"  [OK ] fin.status = ok")
+        print("  [OK ] fin.status = ok")
 
     for name in _PANEL_NAMES:
         env = getattr(brief, name)
@@ -138,7 +138,7 @@ def main() -> int:
 
     mtime_after_cache = cache_file.stat().st_mtime
     if mtime_after_cache != mtime_after_build:
-        print(f"  [FAIL] cache file was rewritten (mtime changed) — not a pure cache read")
+        print("  [FAIL] cache file was rewritten (mtime changed) — not a pure cache read")
         return 1
     # Near-instant relative to the rebuild (and in absolute terms).
     if cache_secs > 2.0:

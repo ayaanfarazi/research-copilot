@@ -26,14 +26,12 @@ from src.llm.panels.addback_adversary import generate_addback_adversary
 from src.llm.panels.synthesis import generate_anchored_synthesis
 from src.llm.schemas.citations import Citation, Claim
 from src.llm.schemas.descriptive import (
-    BusinessSummaryPanel,
     QoECandidatesPanel,
     RevenueDriversPanel,
-    RisksPanel,
 )
 from src.llm.schemas.addback_adversary import AddBackAdversaryPanel
 from src.llm.schemas.synthesis import AnchoredSynthesisPanel
-from src.llm.validator import validate_output
+from src.llm.validator import ValidationResult, validate_output
 from src.metrics.qoe import build_qoe_bridge_from_figures
 
 
@@ -500,7 +498,7 @@ def _print_synthesis(ticker: str, year: int, panel: AnchoredSynthesisPanel, vr: 
     print(f"AnchoredSynthesisPanel JSON  ({ticker} FY{year})")
     print("=" * 70)
     print(panel.model_dump_json(indent=2))
-    print(f"\nValidationResult:")
+    print("\nValidationResult:")
     print(f"  passed    : {vr.passed}")
     print(f"  violations: {len(vr.violations)}")
     for v in vr.violations:
@@ -514,7 +512,7 @@ def _print_addback(ticker: str, year: int, panel: AddBackAdversaryPanel, vr: Val
     print(f"AddBackAdversaryPanel JSON  ({ticker} FY{year})")
     print("=" * 70)
     print(panel.model_dump_json(indent=2))
-    print(f"\nValidationResult:")
+    print("\nValidationResult:")
     print(f"  passed    : {vr.passed}")
     print(f"  violations: {len(vr.violations)}")
     for v in vr.violations:

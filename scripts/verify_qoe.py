@@ -90,7 +90,7 @@ def check_ticker(ticker: str) -> bool:
         print(f"  sbc_required=FAIL  {ticker} has no SBC add-back line")
         ok = False
     elif ticker in SBC_REQUIRED:
-        print(f"  sbc_required=ok")
+        print("  sbc_required=ok")
 
     if bridge.missing_addbacks:
         print("  missing_addbacks:")

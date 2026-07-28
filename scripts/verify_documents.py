@@ -10,7 +10,6 @@ from pathlib import Path
 sys.path.insert(0, ".")
 
 from src.documents.fetch import fetch_and_split_latest_10k  # noqa: E402
-from src.documents.models import FilingDocument              # noqa: E402
 from src.pipeline import build_financials                    # noqa: E402
 
 TICKERS = ["MSFT", "VZ", "MCD", "NVDA", "CRM"]
@@ -39,10 +38,10 @@ def check_ticker(ticker: str, anchors: dict) -> bool:
 
     # split_quality
     if doc.split_quality != "ok":
-        print(f"  split_quality=DEGRADED")
+        print("  split_quality=DEGRADED")
         ok = False
     else:
-        print(f"  split_quality=ok")
+        print("  split_quality=ok")
 
     # Section floors
     for section, floor in _SECTION_FLOORS.items():
@@ -108,7 +107,7 @@ def check_ticker(ticker: str, anchors: dict) -> bool:
                 anchor_ok = False
                 ok = False
     if anchor_ok and company_anchors:
-        print(f"  anchors=ok")
+        print("  anchors=ok")
 
     print(f"  → {'PASS' if ok else 'FAIL'}")
     return ok

@@ -121,18 +121,6 @@ def render_figure(brief: Brief, concept: str, year: int, label: str | None = Non
     return render_figure_object(brief, fig, display_label)
 
 
-def render_figure_by_id(brief: Brief, figure_id: str, label: str | None = None) -> object | None:
-    """Same as render_figure but keyed directly by figure_id (used for bridge rows)."""
-    fig = brief.fin.figures.get(figure_id)
-    display_label = label or figure_id
-    if fig is None:
-        st.markdown(f"**{display_label}:** :red[not found — see filing]")
-        with st.expander("🔍 source"):
-            render_source(brief, figure_id)
-        return None
-    return render_figure_object(brief, fig, display_label)
-
-
 def render_figure_object(brief: Brief, fig: object, display_label: str) -> object:
     """Render a resolved figure object with its confidence badge + source expander."""
     headline = _headline(fig)
@@ -645,8 +633,7 @@ def render_scorecard_band(brief: Brief) -> None:
 
     label = band.label or "unknown"
     token = _BAND_TOKEN.get(label, "neutral")
-    callout = {"success": st.success, "neutral": st.info,
-               "warning": st.warning, "danger": st.error}[token]
+    callout = _CALLOUT[token]
     callout(f"**Credit standing: {label}**  \n{_band_summary(brief, band, year)}", icon="🛡️")
 
     st.subheader(f"Why {label} — the scorecard")
