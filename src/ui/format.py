@@ -23,6 +23,7 @@ threshold is what makes fmt_money(2_935_000_000) == "$2,935M".
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 from src.data.models import ConfidenceTier
@@ -136,6 +137,8 @@ _CONCEPT_LABELS = {
     "ebitda": "EBITDA",
     "adjusted_ebitda": "adjusted EBITDA",
     "adjusted_net_leverage": "Adjusted net leverage",
+    "diluted_shares": "Diluted shares",
+    "contract_cost_amort": "Contract cost amortization",
     "total_debt": "Total debt",
     "net_debt": "Net debt",
     "total_leverage": "Total leverage",
@@ -158,11 +161,12 @@ _CONCEPT_LABELS = {
     "covenant_leverage": "Covenant leverage screen",
     "covenant_coverage": "Covenant coverage screen",
     "credit_band": "Credit band",
-    # Scorecard dimensions (read plainly inside the band's source drill-down).
-    "score_leverage": "Leverage",
-    "score_coverage": "Coverage",
-    "score_trajectory": "Trajectory",
-    "score_liquidity": "Liquidity",
+    # Scorecard dimensions — "leverage score" reads naturally inline in AI prose
+    # ("...per the leverage score") and in the band's source drill-down.
+    "score_leverage": "leverage score",
+    "score_coverage": "coverage score",
+    "score_trajectory": "trajectory score",
+    "score_liquidity": "liquidity score",
 }
 
 
@@ -178,6 +182,47 @@ def label_for(concept: str | None) -> str:
     if known:
         return known
     return concept.replace("_", " ").title()
+
+
+def phrase_label(concept: str | None) -> str:
+    """label_for lower-cased for mid-sentence use, but keeping acronyms (EBITDA, FCF).
+
+    "net_leverage" -> "net leverage"; "adjusted_ebitda" -> "adjusted EBITDA";
+    "ebitda" -> "EBITDA". Used both for inline prose substitution and chip labels.
+    """
+    lbl = label_for(concept)
+    if not lbl or lbl == "—":
+        return lbl
+    head = lbl.split(" ", 1)[0]
+    if head.isupper():
+        return lbl
+    return lbl[:1].lower() + lbl[1:]
+
+
+# A figure_id token embedded in AI prose, e.g. "net_leverage:FY2024".
+_REF_TOKEN = re.compile(r"[A-Za-z_]+:FY20\d{2}")
+
+
+def humanize_refs(text: str | None) -> tuple[str, list[str]]:
+    """Replace every figure_id token in prose with its plain label, and return the
+    cleaned text plus the ordered, de-duplicated figure_ids found.
+
+    "...per score_leverage:FY2024" -> "...per leverage score", ["score_leverage:FY2024"].
+    No raw numeric values are injected — values stay behind the clickable source.
+    """
+    if not text:
+        return text or "", []
+    ids: list[str] = []
+    seen: set[str] = set()
+
+    def _repl(m: re.Match) -> str:
+        token = m.group(0)
+        if token not in seen:
+            seen.add(token)
+            ids.append(token)
+        return phrase_label(token.split(":")[0])
+
+    return _REF_TOKEN.sub(_repl, text), ids
 
 
 # ---------------------------------------------------------------------------

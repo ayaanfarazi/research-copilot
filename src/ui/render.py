@@ -23,13 +23,14 @@ import streamlit as st
 
 from src.brief import Brief
 from src.data.models import ConfidenceTier, make_figure_id
-from src.llm.schemas.citations import Claim
 from src.ui.format import (
     confidence_phrase,
     fmt_date,
     fmt_money,
     fmt_value,
+    humanize_refs,
     label_for,
+    phrase_label,
     sec_filing_url,
     titlecase_entity,
 )
@@ -922,17 +923,38 @@ _PANEL_STATUS_BADGE = {
     "parse_error": ":orange[**⚠ output could not be parsed this run**]",
 }
 
-# Reasoning-panel verdict -> (display text, color).
+# Reasoning-panel verdict -> (display text, semantic token). success/warning/danger
+# read consistently with the credit-standing banner and the scorecard.
 _SYNTHESIS_VERDICT = {
-    "can_service": ("CAN SERVICE", "green"),
-    "conditional": ("CONDITIONAL", "orange"),
-    "cannot_service": ("CANNOT SERVICE", "red"),
+    "can_service": ("Can service", "success"),
+    "conditional": ("Conditional", "warning"),
+    "cannot_service": ("Cannot service", "danger"),
 }
 _ADDBACK_VERDICT = {
-    "adjusted_fair": ("ADJUSTED EBITDA FAIR", "green"),
-    "haircut_warranted": ("HAIRCUT WARRANTED", "orange"),
-    "reject_adjustments": ("REJECT ADJUSTMENTS", "red"),
+    "adjusted_fair": ("Adjusted EBITDA fair", "success"),
+    "haircut_warranted": ("Haircut warranted", "warning"),
+    "reject_adjustments": ("Reject adjustments", "danger"),
 }
+
+_CALLOUT = {"success": st.success, "neutral": st.info, "warning": st.warning, "danger": st.error}
+
+
+def _figure_refs(citations: list | None) -> list[str]:
+    """The figure_ids cited by a list of Citation objects (order-preserving, deduped)."""
+    out: list[str] = []
+    for c in citations or []:
+        if getattr(c, "kind", None) == "figure" and c.ref and c.ref not in out:
+            out.append(c.ref)
+    return out
+
+
+def _render_verdict(brief: Brief, mapping: dict, verdict: object, status: str | None) -> None:
+    """Verdict as a clean semantic callout + the honest per-panel status badge."""
+    display, token = mapping.get(
+        verdict, (str(verdict or "—").replace("_", " ").capitalize(), "neutral")
+    )
+    _CALLOUT[token](f"**Verdict: {display}**")
+    _render_panel_status(status)
 
 
 def _render_panel_status(status: str | None) -> None:
@@ -942,56 +964,89 @@ def _render_panel_status(status: str | None) -> None:
         st.markdown(badge)
 
 
-def _render_citation(brief: Brief, citation: object) -> None:
-    """Render one citation: a figure opens render_source; a section quotes the filing."""
-    if citation.kind == "figure":
-        concept = (citation.ref or "").split(":")[0]
-        with st.expander(f"🔍 source — {label_for(concept)}"):
-            render_source(brief, citation.ref)
-    else:  # section
-        section = _SECTION_LABELS.get(citation.ref, citation.ref)
-        excerpt = (citation.excerpt or "").strip()
-        if excerpt:
-            st.markdown(f"↳ verbatim from **{section}**:")
-            st.markdown(f"> {excerpt}")
-        else:
-            st.caption(f"↳ cited to {section} (no excerpt supplied)")
+def _render_source_chips(brief: Brief, figure_ids: list[str], clause_key: str) -> None:
+    """A compact horizontal row of "🔍 <label>" chips — one per cited figure — each
+    toggling the shared render_source drill-down inline below the row (no expander).
+
+    Only figures that exist are chipped; wraps to a new row every few chips."""
+    ids = [i for i in dict.fromkeys(figure_ids) if brief.fin.figures.get(i) is not None]
+    if not ids:
+        return
+
+    per_row = 4
+    opened: list[str] = []
+    for start in range(0, len(ids), per_row):
+        chunk = ids[start:start + per_row]
+        cols = st.columns(_chip_weights(len(chunk)))
+        for col, fid in zip(cols, chunk):
+            concept = fid.split(":")[0]
+            state_key = f"clausesrc::{clause_key}::{fid}"
+            is_open = bool(st.session_state.get(state_key, False))
+            with col:
+                if st.button(f"🔍 {phrase_label(concept)}", key=_stable_key(f"btn::{state_key}")):
+                    is_open = not is_open
+                    st.session_state[state_key] = is_open
+            if is_open:
+                opened.append(fid)
+
+    for fid in opened:
+        render_source(brief, fid)
 
 
-def render_claim(brief: Brief, claim: object, year: int) -> None:
-    """The credibility centerpiece: a claim's text + each citation's drill-down.
+def _render_clause(
+    brief: Brief, label: str, text: str, fallback_ids: list[str], clause_key: str
+) -> None:
+    """One reasoning clause: humanized prose + per-clause source chips.
 
-    Figure citations open the identical render_source() panel as any rendered
-    number; section citations quote the verbatim filing passage.
-    """
-    text = (getattr(claim, "text", "") or "").strip()
-    st.markdown(text if text else "_(no content surfaced this run)_")
-    for citation in getattr(claim, "citations", None) or []:
-        _render_citation(brief, citation)
+    Chips come from the clause's own inline figure refs; a clause with none (e.g. the
+    thesis) falls back to the panel-level citations so it is never left unanchored."""
+    if label:
+        st.markdown(f"**{label}**")
+    clean, inline_ids = humanize_refs((text or "").strip())
+    st.markdown(clean if clean else "_(no content surfaced this run)_")
+
+    existing_inline = [i for i in inline_ids if brief.fin.figures.get(i) is not None]
+    chip_ids = existing_inline or fallback_ids
+    _render_source_chips(brief, chip_ids, clause_key)
 
 
-def _render_reasoning_claim(brief: Brief, label: str, text: str, citations: list, year: int) -> None:
-    """Render a reasoning-panel prose clause as a claim.
-
-    When the panel supplied figure citations, route the clause through render_claim
-    (synthesizing a Claim from prose + the panel's figure citations) so the clause's
-    figure-anchors are expandable via the same claim→source UX. Otherwise render the
-    prose alone (an empty/validation shell keeps valid empty content, never a crash).
-    """
-    st.markdown(f"**{label}**")
-    text = (text or "").strip()
-    if citations:
-        render_claim(brief, Claim(text=text or " ", citations=list(citations)), year)
+def _render_section_citation(citation: object) -> None:
+    """Keep the verbatim filing excerpt exactly as before (that part reads well)."""
+    section = _SECTION_LABELS.get(citation.ref, citation.ref)
+    excerpt = (citation.excerpt or "").strip()
+    if excerpt:
+        st.markdown(f"↳ verbatim from **{section}**:")
+        st.markdown(f"> {excerpt}")
     else:
-        st.markdown(text if text else "_(no content surfaced this run)_")
+        st.caption(f"↳ cited to {section} (no excerpt supplied)")
 
 
-def _render_caveats(caveats: list) -> None:
+def render_claim(brief: Brief, claim: object, year: int, clause_key: str = "") -> None:
+    """A claim's humanized text, per-figure source chips, and verbatim section quotes.
+
+    Figure citations (and any inline refs) become "🔍 <label>" chips opening the
+    identical render_source drill-down; section citations quote the filing passage."""
+    citations = getattr(claim, "citations", None) or []
+    clean, inline_ids = humanize_refs((getattr(claim, "text", "") or "").strip())
+    st.markdown(clean if clean else "_(no content surfaced this run)_")
+
+    fig_ids = list(dict.fromkeys(inline_ids + _figure_refs(citations)))
+    key = clause_key or f"claim::{fig_ids[0] if fig_ids else id(claim)}"
+    _render_source_chips(brief, fig_ids, key)
+
+    for citation in citations:
+        if getattr(citation, "kind", None) == "section":
+            _render_section_citation(citation)
+
+
+def _render_caveats(brief: Brief, caveats: list, fallback_ids: list[str], clause_key: str) -> None:
+    """Confidence caveats, each humanized with its own source chips."""
     caveats = [c for c in (caveats or []) if (c or "").strip()]
-    if caveats:
-        st.markdown("**Confidence caveats:**")
-        for c in caveats:
-            st.markdown(f"- {c}")
+    if not caveats:
+        return
+    st.markdown("**Confidence caveats:**")
+    for i, caveat in enumerate(caveats):
+        _render_clause(brief, "", caveat, fallback_ids, f"{clause_key}.caveat{i}")
 
 
 # --- Panel A: anchored synthesis (the money-shot, rendered first) -----------
@@ -1003,19 +1058,14 @@ def render_synthesis_panel(brief: Brief) -> None:
         st.info("Synthesis panel was not generated for this brief.")
         return
     panel = env.panel
-    year = brief.fiscal_year
+    fallback = _figure_refs(getattr(panel, "citations", None))
 
-    verdict_txt, verdict_color = _SYNTHESIS_VERDICT.get(
-        getattr(panel, "verdict", None), (str(getattr(panel, "verdict", "—")).upper(), "gray")
-    )
-    st.markdown(f"### Verdict: :{verdict_color}[**{verdict_txt}**]")
-    _render_panel_status(env.validation.status)
+    _render_verdict(brief, _SYNTHESIS_VERDICT, getattr(panel, "verdict", None), env.validation.status)
 
-    # Thesis is the load-bearing claim; its figure-anchors are expandable.
-    _render_reasoning_claim(brief, "Thesis", getattr(panel, "thesis", ""), panel.citations, year)
-    st.markdown(f"**Spine reading.** {(getattr(panel, 'spine_reading', '') or '').strip() or '—'}")
-    st.markdown(f"**Swing factor.** {(getattr(panel, 'swing_factor', '') or '').strip() or '—'}")
-    _render_caveats(getattr(panel, "confidence_caveats", []))
+    _render_clause(brief, "Thesis", getattr(panel, "thesis", ""), fallback, "syn.thesis")
+    _render_clause(brief, "Spine reading", getattr(panel, "spine_reading", ""), fallback, "syn.spine")
+    _render_clause(brief, "Swing factor", getattr(panel, "swing_factor", ""), fallback, "syn.swing")
+    _render_caveats(brief, getattr(panel, "confidence_caveats", []), fallback, "syn")
 
 
 # --- Panel B: add-back adversary (bull vs skeptic) --------------------------
@@ -1027,34 +1077,30 @@ def render_addback_panel(brief: Brief) -> None:
         st.info("Add-back adversary panel was not generated for this brief.")
         return
     panel = env.panel
-    year = brief.fiscal_year
+    fallback = _figure_refs(getattr(panel, "citations", None))
 
-    verdict_txt, verdict_color = _ADDBACK_VERDICT.get(
-        getattr(panel, "verdict", None), (str(getattr(panel, "verdict", "—")).upper(), "gray")
-    )
-    st.markdown(f"### Verdict: :{verdict_color}[**{verdict_txt}**]")
-    _render_panel_status(env.validation.status)
+    _render_verdict(brief, _ADDBACK_VERDICT, getattr(panel, "verdict", None), env.validation.status)
 
-    st.markdown(f"{(getattr(panel, 'headline', '') or '').strip() or '_(no headline this run)_'}")
-
-    # Bull vs skeptic — each side cited via render_claim over the add-back figures.
-    _render_reasoning_claim(brief, "🟢 Accept case (bull)", getattr(panel, "accept_case", ""), panel.citations, year)
-    _render_reasoning_claim(brief, "🔴 Challenge case (skeptic)", getattr(panel, "challenge_case", ""), panel.citations, year)
-    st.markdown(f"**Leverage read.** {(getattr(panel, 'leverage_read', '') or '').strip() or '—'}")
-    st.markdown(f"**Excluded candidates.** {(getattr(panel, 'excluded_candidate_read', '') or '').strip() or '—'}")
-    _render_caveats(getattr(panel, "confidence_caveats", []))
+    _render_clause(brief, "", getattr(panel, "headline", ""), fallback, "ab.headline")
+    _render_clause(brief, "🟢 Accept case (bull)", getattr(panel, "accept_case", ""), fallback, "ab.accept")
+    _render_clause(brief, "🔴 Challenge case (skeptic)", getattr(panel, "challenge_case", ""), fallback, "ab.challenge")
+    _render_clause(brief, "Leverage read", getattr(panel, "leverage_read", ""), fallback, "ab.leverage")
+    _render_clause(brief, "Excluded candidates", getattr(panel, "excluded_candidate_read", ""), fallback, "ab.excluded")
+    _render_caveats(brief, getattr(panel, "confidence_caveats", []), fallback, "ab")
 
 
 # --- Descriptive panels -----------------------------------------------------
 
-def _render_claim_list(brief: Brief, claims: list, year: int, empty_msg: str) -> None:
+def _render_claim_list(
+    brief: Brief, claims: list, year: int, empty_msg: str, clause_key: str = "list"
+) -> None:
     claims = list(claims or [])
     real = [c for c in claims if (getattr(c, "text", "") or "").strip()]
     if not real:
         st.markdown(f"_{empty_msg}_")
         return
-    for claim in real:
-        render_claim(brief, claim, year)
+    for i, claim in enumerate(real):
+        render_claim(brief, claim, year, clause_key=f"{clause_key}.{i}")
 
 
 def render_business_summary_panel(brief: Brief) -> None:
@@ -1067,11 +1113,11 @@ def render_business_summary_panel(brief: Brief) -> None:
     _render_panel_status(env.validation.status)
     headline = getattr(panel, "headline", None)
     if headline is not None and (getattr(headline, "text", "") or "").strip():
-        render_claim(brief, headline, year)
+        render_claim(brief, headline, year, clause_key="biz.headline")
     else:
         st.markdown("_(no headline surfaced this run)_")
     st.markdown("**Business lines**")
-    _render_claim_list(brief, getattr(panel, "business_lines", []), year, "No segments surfaced this run.")
+    _render_claim_list(brief, getattr(panel, "business_lines", []), year, "No segments surfaced this run.", "biz.lines")
 
 
 def render_risks_panel(brief: Brief) -> None:
@@ -1084,7 +1130,7 @@ def render_risks_panel(brief: Brief) -> None:
     _render_panel_status(env.validation.status)
     _render_claim_list(
         brief, getattr(panel, "company_specific_risks", []), year,
-        "No company-specific risks surfaced this run.",
+        "No company-specific risks surfaced this run.", "risks",
     )
     note = (getattr(panel, "boilerplate_note", None) or "").strip()
     if note:
@@ -1100,9 +1146,9 @@ def render_revenue_drivers_panel(brief: Brief) -> None:
     panel, year = env.panel, brief.fiscal_year
     _render_panel_status(env.validation.status)
     st.markdown("**Drivers**")
-    _render_claim_list(brief, getattr(panel, "drivers", []), year, "No drivers surfaced this run.")
+    _render_claim_list(brief, getattr(panel, "drivers", []), year, "No drivers surfaced this run.", "rev.drivers")
     st.markdown("**Segment commentary**")
-    _render_claim_list(brief, getattr(panel, "segment_commentary", []), year, "No segment commentary this run.")
+    _render_claim_list(brief, getattr(panel, "segment_commentary", []), year, "No segment commentary this run.", "rev.segments")
 
 
 def render_qoe_candidates_panel(brief: Brief) -> None:
@@ -1115,5 +1161,5 @@ def render_qoe_candidates_panel(brief: Brief) -> None:
     _render_panel_status(env.validation.status)
     _render_claim_list(
         brief, getattr(panel, "claimed_one_time_items", []), year,
-        "No candidates surfaced this run.",
+        "No candidates surfaced this run.", "qoe",
     )

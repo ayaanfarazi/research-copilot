@@ -42,6 +42,9 @@ _HONEST_BADGE_SUBSTR = "did not fully validate this run"
 _RAW_FLOAT_RE = re.compile(r"\d+\.\d{6,}")
 _FIGURE_ID_RE = re.compile(r"[a-z_]+:FY\d{4}")
 
+# The raw figure_id token that must never leak into humanized AI-panel prose.
+_AI_REF_RE = re.compile(r"[A-Za-z_]+:FY20\d{2}")
+
 _REVENUE_TAG = "RevenueFromContractWithCustomerExcludingAssessedTax"
 
 
@@ -139,6 +142,22 @@ def _bridge_app() -> None:
 
     begin_render_run()
     render_ebitda_bridge(_assemble("MSFT", use_cache=True))
+
+
+def _synthesis_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_synthesis_panel
+
+    begin_render_run()
+    render_synthesis_panel(_assemble("MSFT", use_cache=True))
+
+
+def _addback_app() -> None:
+    from src.brief import assemble_brief as _assemble
+    from src.ui.render import begin_render_run, render_addback_panel
+
+    begin_render_run()
+    render_addback_panel(_assemble("MSFT", use_cache=True))
 
 
 def _run_formatter_unit_checks() -> bool:
@@ -299,6 +318,7 @@ def main() -> int:
 
     # ---------------------------------------------------------------- Investor
     at.radio[0].set_value("Investor").run()
+    inv_page_text = _all_text(at)  # for the AI-ref token scan in the other view
 
     inv_exc_ok = len(at.exception) == 0
     print(f"\n[8] no uncaught exception (Investor): {'OK' if inv_exc_ok else 'FAIL'} "
@@ -644,6 +664,64 @@ def main() -> int:
     for lbl, val in zip(br_md[0::2], br_md[1::2]):
         print(f"    {lbl.strip('*'):30} {val}")
 
+    # ------------------------------- Packet D: humanize the AI-panel claims
+    print("\n" + "-" * 70)
+    print("PACKET D — humanize AI-panel claims (inline refs → labels + source chips)")
+    print("-" * 70)
+
+    # [34] no raw figure_id token leaks into the AI-panel prose, in EITHER view.
+    cred_tokens = sorted(set(_AI_REF_RE.findall(page_text)))
+    inv_tokens = sorted(set(_AI_REF_RE.findall(inv_page_text)))
+    no_tokens_ok = not cred_tokens and not inv_tokens
+    print(f"[34] no figure_id token in AI prose     : {'OK' if no_tokens_ok else 'FAIL'} "
+          f"(credit={len(cred_tokens)}, investor={len(inv_tokens)})")
+    if cred_tokens or inv_tokens:
+        print("      leftover:", (cred_tokens or inv_tokens)[:5])
+
+    # [35] a reasoning clause with inline refs renders source chips that open
+    #      render_source; a fact-backed chip reaches a real SEC.gov link.
+    at_syn = AppTest.from_function(_synthesis_app, default_timeout=90)
+    at_syn.run()
+    syn_chips = [b.label for b in at_syn.button if b.label.startswith("🔍 ")]
+    for b in at_syn.button:
+        if b.label == "🔍 capital expenditure":  # capex is a raw fact -> direct SEC link
+            b.click().run()
+            break
+    syn_drill = _all_text(at_syn)
+    chips_ok = (
+        len(at_syn.exception) == 0 and len(syn_chips) >= 3
+        and "sec.gov/Archives/edgar" in syn_drill and "XBRL tag" in syn_drill
+    )
+    print(f"[35] clause source chips → render_source: {'OK' if chips_ok else 'FAIL'} "
+          f"({len(syn_chips)} chips, capex chip reaches SEC)")
+
+    # [36] each verdict renders as its semantic callout (synthesis→success,
+    #      add-back→warning for MSFT's can_service / haircut_warranted).
+    syn_verdict_ok = any("Verdict: Can service" in s.value for s in at_syn.success)
+    at_ab = AppTest.from_function(_addback_app, default_timeout=90)
+    at_ab.run()
+    ab_verdict_ok = any("Verdict: Haircut warranted" in w.value for w in at_ab.warning)
+    ab_no_tokens = not _AI_REF_RE.search(_all_text(at_ab))
+    verdict_ok = (
+        len(at_syn.exception) == 0 and len(at_ab.exception) == 0
+        and syn_verdict_ok and ab_verdict_ok and ab_no_tokens
+    )
+    print(f"[36] verdicts render semantic colours   : {'OK' if verdict_ok else 'FAIL'} "
+          f"(syn=success:{syn_verdict_ok}, addback=warning:{ab_verdict_ok})")
+
+    # [37] the honest per-panel status badge still shows for a non-ok panel.
+    badge_still_ok = _HONEST_BADGE_SUBSTR in page_text
+    print(f"[37] panel status badge still shows     : {'OK' if badge_still_ok else 'FAIL'}")
+
+    print("\n  --- Panel A (synthesis) humanized ---")
+    for m in at_syn.markdown[:8]:
+        if isinstance(m.value, str):
+            print("    " + m.value[:150])
+    print("    verdict callout:", [s.value for s in at_syn.success])
+    print("    chips:", syn_chips[:14])
+    print("  --- Panel B (add-back) verdict ---")
+    print("    verdict callout:", [w.value for w in at_ab.warning if "Verdict" in w.value])
+
     print("\n  --- revenue source view (rendered text) ---")
     for line in rev_src.splitlines():
         print("    " + line)
@@ -682,6 +760,7 @@ def main() -> int:
         and banner_ok and tiles_ok and sc_clean_ok and rule_ok and source_ok and withheld_ok
         and header_ok and rows_ok and row_drill_ok and mw_ok and km_clean_ok
         and sv_ok and cv_ok and bridge_labels_clean and pill_ok
+        and no_tokens_ok and chips_ok and verdict_ok and badge_still_ok
     )
     print("\n" + "=" * 70)
     print("GATE: ALL CHECKS PASSED" if ok else "GATE: FAILED")
