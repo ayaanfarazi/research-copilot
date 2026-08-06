@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import Any, TypeVar
 
 import anthropic
@@ -11,7 +12,14 @@ from src.documents.models import FilingDocument
 from src.llm.allowlist import EnumeratedAllowlist
 from src.llm.validator import ValidationMode, ValidationResult, ValidationViolation, validate_output
 
-_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+@lru_cache(maxsize=1)
+def _get_client() -> anthropic.Anthropic:
+    """Build the Anthropic client once, on first use — so importing this module
+    (and everything that reaches the panels) does not require an API key. The
+    key is required here, at the first real call."""
+    return anthropic.Anthropic(api_key=config.require_anthropic_key())
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -48,7 +56,7 @@ def structured_call(
     }
 
     messages: list[dict] = [{"role": "user", "content": user_message}]
-    response = _client.messages.create(
+    response = _get_client().messages.create(
         model=config.ANTHROPIC_MODEL,
         max_tokens=max_tokens,
         system=system_prompt,
@@ -87,7 +95,7 @@ def structured_call(
             ],
         },
     ]
-    retry_response = _client.messages.create(
+    retry_response = _get_client().messages.create(
         model=config.ANTHROPIC_MODEL,
         max_tokens=max_tokens,
         system=system_prompt,
@@ -203,7 +211,7 @@ def smoke_call() -> SmokeTestResponse:
         anthropic.APIConnectionError:  Network unreachable.
         ValidationError:               Model returned JSON that doesn't match schema.
     """
-    response = _client.messages.create(
+    response = _get_client().messages.create(
         model=config.ANTHROPIC_MODEL,
         max_tokens=64,
         messages=[

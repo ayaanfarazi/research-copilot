@@ -22,8 +22,9 @@ def run(ticker: str) -> bool:
     print("[config] Loading environment variables...")
     try:
         import config
+        config.require_anthropic_key()
         print("[config] ✓ ANTHROPIC_API_KEY: set")
-        print(f"[config] ✓ SEC_USER_AGENT: {config.SEC_USER_AGENT}")
+        print(f"[config] ✓ SEC_USER_AGENT: {config.require_sec_user_agent()}")
     except ValueError as e:
         print(f"[config] ✗ {e}")
         return False  # Nothing else can run without config.

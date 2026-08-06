@@ -19,12 +19,17 @@ def _require(key: str) -> str:
         )
     return value
 
-# Loaded once at import time; any missing key fails immediately.
-ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
+# Keys are required lazily, at first use — not at import — so the cached app
+# (which makes no API calls) runs keyless. The clear ValueError still fires the
+# moment a code path actually needs a key.
+def require_anthropic_key() -> str:
+    return _require("ANTHROPIC_API_KEY")
+
 
 # SEC requires a descriptive User-Agent on every request or returns 403.
 # Format: "Name project-name email"
-SEC_USER_AGENT: str = _require("SEC_USER_AGENT")
+def require_sec_user_agent() -> str:
+    return _require("SEC_USER_AGENT")
 
 # Base URLs for the two SEC APIs we use.
 SEC_BASE_URL = "https://data.sec.gov"

@@ -57,7 +57,7 @@ def get_json(url: str, use_cache: bool = True) -> dict:
     _throttle()
 
     # SEC's terms require a descriptive User-Agent; generic strings get blocked.
-    headers = {"User-Agent": config.SEC_USER_AGENT}
+    headers = {"User-Agent": config.require_sec_user_agent()}
     response = requests.get(url, headers=headers, timeout=30)
 
     if response.status_code == 403:
@@ -119,7 +119,7 @@ def get_filing_html(url: str, use_cache: bool = True) -> str:
 
     _throttle()
 
-    headers = {"User-Agent": config.SEC_USER_AGENT}
+    headers = {"User-Agent": config.require_sec_user_agent()}
     response = requests.get(url, headers=headers, timeout=60)
 
     if response.status_code == 403:
